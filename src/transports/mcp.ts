@@ -14,8 +14,13 @@ import { runIndex } from '../index/orchestrator.js';
 import { detectRoot } from '../workspace/detector.js';
 import type Database from 'better-sqlite3';
 
-// Side-effect: register language adapters
+// Side-effect: register all language adapters
 import '../analysis/languages/typescript.js';
+import '../analysis/languages/python.js';
+import '../analysis/languages/go.js';
+import '../analysis/languages/rust.js';
+import '../analysis/languages/java.js';
+import '../analysis/languages/csharp.js';
 
 // ── Server Setup ──────────────────────────────────────────────────────
 

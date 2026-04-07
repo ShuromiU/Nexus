@@ -13,8 +13,13 @@ import type {
   TreeEntry, IndexStats, NexusResult, ImporterResult,
 } from '../query/engine.js';
 
-// Side-effect: register language adapters
+// Side-effect: register all language adapters
 import '../analysis/languages/typescript.js';
+import '../analysis/languages/python.js';
+import '../analysis/languages/go.js';
+import '../analysis/languages/rust.js';
+import '../analysis/languages/java.js';
+import '../analysis/languages/csharp.js';
 
 // ── Output Formatting ─────────────────────────────────────────────────
 
