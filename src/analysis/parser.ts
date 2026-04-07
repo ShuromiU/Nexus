@@ -5,6 +5,7 @@ import treeSitterGo from 'tree-sitter-go';
 import treeSitterRust from 'tree-sitter-rust';
 import treeSitterJava from 'tree-sitter-java';
 import treeSitterCSharp from 'tree-sitter-c-sharp';
+import treeSitterCSS from 'tree-sitter-css';
 
 const { typescript: tsLanguage, tsx: tsxLanguage } = treeSitterTS as {
   typescript: unknown;
@@ -25,6 +26,7 @@ const GRAMMARS: Record<string, unknown> = {
   rust: treeSitterRust,
   java: treeSitterJava,
   csharp: treeSitterCSharp,
+  css: treeSitterCSS,
 };
 
 /** Cached parser instances per grammar (avoid re-creating) */

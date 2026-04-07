@@ -11,6 +11,7 @@ import './languages/go.js';
 import './languages/rust.js';
 import './languages/java.js';
 import './languages/csharp.js';
+import './languages/css.js';
 
 /**
  * Result of extracting a single file, including parse metadata.

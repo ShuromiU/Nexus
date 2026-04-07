@@ -19,6 +19,7 @@ const DEFAULT_EXTENSIONS: Record<string, string> = {
   '.rs': 'rust',
   '.java': 'java',
   '.cs': 'csharp',
+  '.css': 'css',
 };
 
 export interface ScannedFile {

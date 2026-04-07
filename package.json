@@ -55,6 +55,7 @@
     "commander": "^14.0.3",
     "tree-sitter": "^0.22.4",
     "tree-sitter-c-sharp": "^0.21.3",
+    "tree-sitter-css": "^0.23.2",
     "tree-sitter-go": "^0.21.2",
     "tree-sitter-java": "^0.21.0",
     "tree-sitter-python": "^0.21.0",
