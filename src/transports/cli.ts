@@ -312,6 +312,13 @@ export function createProgram(): Command {
         const lines: string[] = [];
         if (result.results.length === 0) {
           lines.push('No matches found.');
+          if (result.suggestions && result.suggestions.length > 0) {
+            lines.push('');
+            lines.push('  Did you mean?');
+            for (const s of result.suggestions) {
+              lines.push(`    - ${s}`);
+            }
+          }
         } else {
           for (const s of result.results) {
             const score = (s._score * 100).toFixed(0);

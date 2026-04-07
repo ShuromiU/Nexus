@@ -3,7 +3,7 @@ import { NexusStore } from '../db/store.js';
 import type { SymbolRow, FileRow, ModuleEdgeRow } from '../db/store.js';
 import { getAllAdapters } from '../analysis/languages/registry.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
-import { fuzzyScore, rankResults } from './ranking.js';
+import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
 
 // ── Result Types ──────────────────────────────────────────────────────
 
@@ -12,6 +12,7 @@ export interface NexusResult<T> {
   type: 'find' | 'occurrences' | 'exports' | 'imports' | 'tree' | 'search' | 'stats';
   results: T[];
   count: number;
+  suggestions?: string[];
   index_status: 'current' | 'stale' | 'reindexing';
   index_health: 'ok' | 'partial';
   timing_ms: number;
@@ -304,34 +305,98 @@ export class QueryEngine {
   }
 
   /**
-   * Fuzzy search across symbol names, optionally filtered by kind.
+   * Fuzzy search across symbol names, file paths, scopes, and docstrings.
+   * Single-word queries match symbol names first, with path/doc fallback.
+   * Multi-word queries tokenize and match each token across all fields.
+   * Returns "did you mean?" suggestions when no results are found.
    */
   search(query: string, limit = 20, kind?: string): NexusResult<SymbolResult & { _score: number }> {
     const start = performance.now();
+    const trimmed = query.trim();
+    const isMultiWord = trimmed.includes(' ');
+    const tokens = isMultiWord ? trimmed.split(/\s+/).filter(t => t.length > 0) : [trimmed];
 
     // Get symbols — filter by kind in SQL when possible
     const allSymbols = kind
       ? this.db.prepare('SELECT * FROM symbols WHERE kind = ?').all(kind) as (SymbolRow & { id: number })[]
       : this.db.prepare('SELECT * FROM symbols').all() as (SymbolRow & { id: number })[];
 
+    // Pre-load file map for path-based scoring (avoids N+1 queries)
+    const fileMap = new Map<number, FileRow & { id: number }>();
+    for (const f of this.store.getAllFiles()) {
+      fileMap.set(f.id, f);
+    }
+
     const scored: (SymbolResult & { _score: number })[] = [];
 
     for (const row of allSymbols) {
-      const match = fuzzyScore(query, row.name);
-      if (!match.matched) continue;
-
-      const file = this.store.getFileById(row.file_id);
+      const file = fileMap.get(row.file_id);
       if (!file) continue;
 
+      // Extract searchable path basename: "KanbanBoard" from "components/KanbanBoard.tsx"
+      const pathSegments = file.path.split(/[\\/]/);
+      const basename = pathSegments[pathSegments.length - 1]?.replace(/\.[^.]+$/, '') ?? '';
+      // Truncate doc to first 200 chars to avoid noise from long docstrings
+      const docSnippet = row.doc ? row.doc.slice(0, 200) : '';
+
+      let matchScore: number;
+
+      if (isMultiWord) {
+        // Multi-word: match tokens across name, path, scope, doc
+        const fields = [
+          { text: row.name, weight: 1.0 },
+          { text: basename, weight: 0.7 },
+          ...(row.scope ? [{ text: row.scope, weight: 0.6 }] : []),
+          ...(docSnippet ? [{ text: docSnippet, weight: 0.4 }] : []),
+        ];
+        const match = multiFieldScore(tokens, fields);
+        if (!match.matched) continue;
+        matchScore = match.score;
+      } else {
+        // Single-word: name first, then path/doc fallback
+        const nameMatch = fuzzyScore(trimmed, row.name);
+        if (nameMatch.matched) {
+          matchScore = nameMatch.score;
+        } else {
+          // Fallback: check basename and docstring
+          const pathMatch = fuzzyScore(trimmed, basename);
+          const docMatch = docSnippet ? fuzzyScore(trimmed, docSnippet) : { score: 0, matched: false };
+
+          const bestFallback = Math.max(
+            pathMatch.matched ? pathMatch.score * 0.7 : 0,
+            docMatch.matched ? docMatch.score * 0.4 : 0,
+          );
+          if (bestFallback === 0) continue;
+          matchScore = bestFallback;
+        }
+      }
+
       scored.push({
-        ...this.symbolRowToResult(row),
-        _score: match.score,
+        name: row.name,
+        kind: row.kind,
+        file: file.path,
+        line: row.line,
+        col: row.col,
+        ...(row.end_line != null ? { end_line: row.end_line } : {}),
+        ...(row.signature ? { signature: row.signature } : {}),
+        ...(row.scope ? { scope: row.scope } : {}),
+        ...(row.doc ? { doc: row.doc } : {}),
+        language: file.language,
+        _score: matchScore,
       });
     }
 
     const ranked = rankResults(scored).slice(0, limit);
 
-    return this.wrap('search', `search ${query}`, ranked, start);
+    const result = this.wrap('search', `search ${query}`, ranked, start);
+
+    // Generate suggestions when no results found
+    if (ranked.length === 0) {
+      const allNames = allSymbols.map(s => s.name);
+      result.suggestions = getSuggestions(trimmed, allNames);
+    }
+
+    return result;
   }
 
   /**
