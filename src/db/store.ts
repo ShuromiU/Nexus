@@ -278,7 +278,7 @@ export class NexusStore {
 
   getImportsByFileId(fileId: number): (ModuleEdgeRow & { id: number })[] {
     return this.db
-      .prepare("SELECT * FROM module_edges WHERE file_id = ? AND kind = 'import'")
+      .prepare("SELECT * FROM module_edges WHERE file_id = ? AND kind IN ('import', 'dynamic-import', 'require')")
       .all(fileId) as (ModuleEdgeRow & { id: number })[];
   }
 
@@ -299,7 +299,7 @@ export class NexusStore {
   getImportsBySourceLike(sourcePattern: string): (ModuleEdgeRow & { id: number })[] {
     return this.db
       .prepare(
-        "SELECT * FROM module_edges WHERE kind = 'import' AND source LIKE ? ORDER BY file_id, line",
+        "SELECT * FROM module_edges WHERE kind IN ('import', 'dynamic-import', 'require') AND source LIKE ? ORDER BY file_id, line",
       )
       .all(`%${sourcePattern}%`) as (ModuleEdgeRow & { id: number })[];
   }
@@ -307,7 +307,7 @@ export class NexusStore {
   getImportsBySourceExact(source: string): (ModuleEdgeRow & { id: number })[] {
     return this.db
       .prepare(
-        "SELECT * FROM module_edges WHERE kind = 'import' AND source = ? ORDER BY file_id, line",
+        "SELECT * FROM module_edges WHERE kind IN ('import', 'dynamic-import', 'require') AND source = ? ORDER BY file_id, line",
       )
       .all(source) as (ModuleEdgeRow & { id: number })[];
   }

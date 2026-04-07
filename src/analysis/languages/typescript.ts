@@ -550,7 +550,69 @@ function extractEdges(root: Parser.SyntaxNode): EdgeOut[] {
     }
   }
 
+  // Walk full AST for dynamic import() and require() calls
+  extractDynamicImportsAndRequires(root, edges);
+
   return edges;
+}
+
+/**
+ * Walk the full AST to find dynamic import() and require() calls.
+ *
+ * Dynamic import: call_expression → import (keyword) + arguments → string → string_fragment
+ * Require:        call_expression → identifier "require" + arguments → string → string_fragment
+ */
+function extractDynamicImportsAndRequires(node: Parser.SyntaxNode, edges: EdgeOut[]): void {
+  if (node.type === 'call_expression') {
+    const fn = node.firstChild;
+
+    // Dynamic import(): import('./foo')
+    if (fn?.type === 'import') {
+      const source = extractCallSource(node);
+      if (source) {
+        edges.push({
+          kind: 'dynamic-import',
+          name: null,
+          alias: null,
+          source,
+          line: node.startPosition.row + 1,
+          is_default: false,
+          is_star: false,
+          is_type: false,
+        });
+      }
+      return;
+    }
+
+    // require(): const x = require('./foo')
+    if (fn?.type === 'identifier' && fn.text === 'require') {
+      const source = extractCallSource(node);
+      if (source) {
+        edges.push({
+          kind: 'require',
+          name: null,
+          alias: null,
+          source,
+          line: node.startPosition.row + 1,
+          is_default: false,
+          is_star: false,
+          is_type: false,
+        });
+      }
+      return;
+    }
+  }
+
+  for (let i = 0; i < node.childCount; i++) {
+    extractDynamicImportsAndRequires(node.child(i)!, edges);
+  }
+}
+
+/** Extract the string source from a call_expression's arguments. */
+function extractCallSource(node: Parser.SyntaxNode): string | null {
+  const args = node.namedChildren.find(c => c.type === 'arguments');
+  const str = args?.namedChildren.find(c => c.type === 'string');
+  return str?.namedChildren.find(c => c.type === 'string_fragment')?.text ?? null;
 }
 
 function extractImport(node: Parser.SyntaxNode, edges: EdgeOut[]): void {

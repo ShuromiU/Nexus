@@ -26,10 +26,31 @@ import '../analysis/languages/csharp.js';
 
 let db: Database.Database | null = null;
 let engine: QueryEngine | null = null;
+let indexRootDir: string | null = null;
+let lastFreshnessCheck = 0;
+const FRESHNESS_INTERVAL = 30_000; // 30 seconds
 
 function getEngine(): QueryEngine {
   if (engine) return engine;
   throw new Error('Index not initialized. Server is still starting up.');
+}
+
+/**
+ * Ensure index is fresh before queries. If more than FRESHNESS_INTERVAL ms
+ * since the last check, run an incremental reindex. The incremental mode
+ * uses mtime/size/hash detection — if nothing changed, it's fast (~100ms).
+ */
+function ensureFresh(): void {
+  if (!indexRootDir) return;
+  const now = Date.now();
+  if (now - lastFreshnessCheck < FRESHNESS_INTERVAL) return;
+
+  try {
+    runIndex(indexRootDir);
+  } catch (err) {
+    console.error(`Freshness check warning: ${err instanceof Error ? err.message : err}`);
+  }
+  lastFreshnessCheck = now;
 }
 
 /**
@@ -38,6 +59,7 @@ function getEngine(): QueryEngine {
  */
 function initializeIndex(startDir: string): void {
   const rootDir = detectRoot(startDir);
+  indexRootDir = rootDir;
   const dbPath = path.join(rootDir, '.nexus', 'index.db');
 
   // Ensure .nexus directory exists
@@ -55,6 +77,7 @@ function initializeIndex(startDir: string): void {
   db = openDatabase(dbPath);
   applySchema(db);
   engine = new QueryEngine(db);
+  lastFreshnessCheck = Date.now();
 }
 
 // ── MCP Server ────────────────────────────────────────────────────────
@@ -169,6 +192,14 @@ export function createMcpServer(): Server {
             properties: {},
           },
         },
+        {
+          name: 'nexus_reindex',
+          description: 'Trigger an incremental reindex. Detects changed/added/deleted files and re-parses only those. Use when files have been modified during a session and you need up-to-date results.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {},
+          },
+        },
       ],
     };
   });
@@ -179,6 +210,17 @@ export function createMcpServer(): Server {
     const { name, arguments: args } = request.params;
 
     try {
+      // nexus_reindex is handled before freshness check (it IS the freshness mechanism)
+      if (name === 'nexus_reindex') {
+        if (!indexRootDir) throw new Error('Index root not initialized');
+        const result = runIndex(indexRootDir);
+        lastFreshnessCheck = Date.now();
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+
+      // Auto-refresh if stale (>30s since last check)
+      ensureFresh();
+
       const qe = getEngine();
 
       switch (name) {

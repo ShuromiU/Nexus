@@ -473,6 +473,136 @@ describe('export extraction', () => {
   });
 });
 
+// ── Dynamic Import Tests ───────────────────────────────────────────────
+
+describe('dynamic import extraction', () => {
+  it('extracts standard dynamic import()', () => {
+    const result = extractSource(
+      `const mod = await import('./module');`,
+      'test.ts',
+      'typescript',
+    );
+    if (!result.parsed) return;
+
+    const dynImport = result.edges.find(e => e.kind === 'dynamic-import');
+    expect(dynImport).toBeDefined();
+    expect(dynImport!.source).toBe('./module');
+    expect(dynImport!.is_default).toBe(false);
+    expect(dynImport!.is_type).toBe(false);
+  });
+
+  it('extracts Next.js dynamic(() => import(...))', () => {
+    const result = extractSource(
+      `const Foo = dynamic(() => import("@/components/Foo").then(m => ({ default: m.Foo })), { ssr: false });`,
+      'test.ts',
+      'typescript',
+    );
+    if (!result.parsed) return;
+
+    const dynImport = result.edges.find(e => e.kind === 'dynamic-import');
+    expect(dynImport).toBeDefined();
+    expect(dynImport!.source).toBe('@/components/Foo');
+  });
+
+  it('extracts bare import() for side effects', () => {
+    const result = extractSource(
+      `import('./side-effect');`,
+      'test.ts',
+      'typescript',
+    );
+    if (!result.parsed) return;
+
+    const dynImport = result.edges.find(e => e.kind === 'dynamic-import');
+    expect(dynImport).toBeDefined();
+    expect(dynImport!.source).toBe('./side-effect');
+  });
+
+  it('extracts conditional dynamic imports', () => {
+    const result = extractSource(
+      `if (condition) { const m = await import('./lazy'); }`,
+      'test.ts',
+      'typescript',
+    );
+    if (!result.parsed) return;
+
+    const dynImport = result.edges.find(e => e.kind === 'dynamic-import');
+    expect(dynImport).toBeDefined();
+    expect(dynImport!.source).toBe('./lazy');
+  });
+
+  it('does not duplicate static imports as dynamic', () => {
+    const result = extractSource(
+      `import { foo } from './bar';\nconst x = await import('./baz');`,
+      'test.ts',
+      'typescript',
+    );
+    if (!result.parsed) return;
+
+    const staticImports = result.edges.filter(e => e.kind === 'import');
+    const dynamicImports = result.edges.filter(e => e.kind === 'dynamic-import');
+    expect(staticImports).toHaveLength(1);
+    expect(staticImports[0].source).toBe('./bar');
+    expect(dynamicImports).toHaveLength(1);
+    expect(dynamicImports[0].source).toBe('./baz');
+  });
+});
+
+// ── Require Tests ──────────────────────────────────────────────────────
+
+describe('require() extraction', () => {
+  it('extracts basic require()', () => {
+    const result = extractSource(
+      `const path = require('path');`,
+      'test.js',
+      'javascript',
+    );
+    if (!result.parsed) return;
+
+    const req = result.edges.find(e => e.kind === 'require');
+    expect(req).toBeDefined();
+    expect(req!.source).toBe('path');
+  });
+
+  it('extracts destructured require()', () => {
+    const result = extractSource(
+      `const { app, BrowserWindow } = require('electron');`,
+      'test.js',
+      'javascript',
+    );
+    if (!result.parsed) return;
+
+    const req = result.edges.find(e => e.kind === 'require');
+    expect(req).toBeDefined();
+    expect(req!.source).toBe('electron');
+  });
+
+  it('extracts relative require()', () => {
+    const result = extractSource(
+      `const utils = require('./utils');`,
+      'test.js',
+      'javascript',
+    );
+    if (!result.parsed) return;
+
+    const req = result.edges.find(e => e.kind === 'require');
+    expect(req).toBeDefined();
+    expect(req!.source).toBe('./utils');
+  });
+
+  it('does not confuse require with other function calls', () => {
+    const result = extractSource(
+      `const x = someFunc('path');\nconst y = require('fs');`,
+      'test.js',
+      'javascript',
+    );
+    if (!result.parsed) return;
+
+    const reqs = result.edges.filter(e => e.kind === 'require');
+    expect(reqs).toHaveLength(1);
+    expect(reqs[0].source).toBe('fs');
+  });
+});
+
 // ── Occurrence Tests ────────────────────────────────────────────────────
 
 describe('occurrence extraction', () => {
