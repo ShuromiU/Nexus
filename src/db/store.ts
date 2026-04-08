@@ -65,6 +65,33 @@ export interface IndexRunRow {
   status: string;
 }
 
+// ── JOIN result types (avoids N+1 queries) ───────────────────────────
+
+export interface SymbolWithFile extends SymbolRow {
+  id: number;
+  file_path: string;
+  file_language: string;
+}
+
+export interface OccurrenceWithFile extends OccurrenceRow {
+  id: number;
+  file_path: string;
+}
+
+export interface ImportEdgeWithFile extends ModuleEdgeRow {
+  id: number;
+  file_path: string;
+  file_language: string;
+}
+
+export interface TreeDataRow {
+  id: number;
+  path: string;
+  language: string;
+  status: string;
+  symbol_count: number;
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export class NexusStore {
@@ -143,6 +170,10 @@ export class NexusStore {
       .run(...ids);
   }
 
+  deleteAllFiles(): void {
+    this.db.prepare('DELETE FROM files').run();
+  }
+
   // ── Symbols ─────────────────────────────────────────────────────────
 
   insertSymbol(symbol: SymbolRow): number {
@@ -219,6 +250,123 @@ export class NexusStore {
     return this.db
       .prepare('SELECT * FROM symbols WHERE name = ? AND kind = ?')
       .all(name, kind) as (SymbolRow & { id: number })[];
+  }
+
+  // ── JOIN Queries (avoids N+1) ──────────────────────────────────────
+
+  getSymbolsWithFile(name: string, kind?: string): SymbolWithFile[] {
+    const sql = kind
+      ? `SELECT s.*, f.path AS file_path, f.language AS file_language
+         FROM symbols s JOIN files f ON s.file_id = f.id
+         WHERE s.name = ? AND s.kind = ?`
+      : `SELECT s.*, f.path AS file_path, f.language AS file_language
+         FROM symbols s JOIN files f ON s.file_id = f.id
+         WHERE s.name = ?`;
+    return (kind
+      ? this.db.prepare(sql).all(name, kind)
+      : this.db.prepare(sql).all(name)
+    ) as SymbolWithFile[];
+  }
+
+  getSymbolsWithFileCaseInsensitive(name: string, kind?: string): SymbolWithFile[] {
+    const sql = kind
+      ? `SELECT s.*, f.path AS file_path, f.language AS file_language
+         FROM symbols s JOIN files f ON s.file_id = f.id
+         WHERE s.name = ? COLLATE NOCASE AND s.kind = ?`
+      : `SELECT s.*, f.path AS file_path, f.language AS file_language
+         FROM symbols s JOIN files f ON s.file_id = f.id
+         WHERE s.name = ? COLLATE NOCASE`;
+    return (kind
+      ? this.db.prepare(sql).all(name, kind)
+      : this.db.prepare(sql).all(name)
+    ) as SymbolWithFile[];
+  }
+
+  getOccurrencesWithFile(name: string): OccurrenceWithFile[] {
+    return this.db
+      .prepare(
+        `SELECT o.*, f.path AS file_path
+         FROM occurrences o JOIN files f ON o.file_id = f.id
+         WHERE o.name = ?`,
+      )
+      .all(name) as OccurrenceWithFile[];
+  }
+
+  getImportEdgesWithFile(source: string): ImportEdgeWithFile[] {
+    return this.db
+      .prepare(
+        `SELECT e.*, f.path AS file_path, f.language AS file_language
+         FROM module_edges e JOIN files f ON e.file_id = f.id
+         WHERE e.kind IN ('import', 'dynamic-import', 'require') AND e.source = ?
+         ORDER BY f.path, e.line`,
+      )
+      .all(source) as ImportEdgeWithFile[];
+  }
+
+  getImportEdgesWithFileLike(sourcePattern: string): ImportEdgeWithFile[] {
+    return this.db
+      .prepare(
+        `SELECT e.*, f.path AS file_path, f.language AS file_language
+         FROM module_edges e JOIN files f ON e.file_id = f.id
+         WHERE e.kind IN ('import', 'dynamic-import', 'require') AND e.source LIKE ?
+         ORDER BY f.path, e.line`,
+      )
+      .all(`%${sourcePattern}%`) as ImportEdgeWithFile[];
+  }
+
+  getImportersByResolvedFileId(fileId: number): ImportEdgeWithFile[] {
+    return this.db
+      .prepare(
+        `SELECT e.*, f.path AS file_path, f.language AS file_language
+         FROM module_edges e JOIN files f ON e.file_id = f.id
+         WHERE e.resolved_file_id = ?
+         ORDER BY f.path, e.line`,
+      )
+      .all(fileId) as ImportEdgeWithFile[];
+  }
+
+  getTreeData(pathPrefix?: string): TreeDataRow[] {
+    const sql = pathPrefix
+      ? `SELECT f.id, f.path, f.language, f.status,
+                COUNT(DISTINCT s.id) AS symbol_count
+         FROM files f
+         LEFT JOIN symbols s ON s.file_id = f.id
+         WHERE f.path LIKE ? OR REPLACE(f.path, '\\', '/') LIKE ?
+         GROUP BY f.id
+         ORDER BY f.path`
+      : `SELECT f.id, f.path, f.language, f.status,
+                COUNT(DISTINCT s.id) AS symbol_count
+         FROM files f
+         LEFT JOIN symbols s ON s.file_id = f.id
+         GROUP BY f.id
+         ORDER BY f.path`;
+    return (pathPrefix
+      ? this.db.prepare(sql).all(`${pathPrefix}%`, `${pathPrefix}%`)
+      : this.db.prepare(sql).all()
+    ) as TreeDataRow[];
+  }
+
+  getExportNamesByFileIds(fileIds: number[]): Map<number, string[]> {
+    if (fileIds.length === 0) return new Map();
+    const placeholders = fileIds.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT file_id, name, is_default, is_star
+         FROM module_edges
+         WHERE file_id IN (${placeholders}) AND kind IN ('export', 're-export')`,
+      )
+      .all(...fileIds) as { file_id: number; name: string | null; is_default: number; is_star: number }[];
+
+    const result = new Map<number, string[]>();
+    for (const row of rows) {
+      const name = row.name ?? (row.is_default ? '<default>' : row.is_star ? '*' : null);
+      if (name) {
+        const arr = result.get(row.file_id) ?? [];
+        arr.push(name);
+        result.set(row.file_id, arr);
+      }
+    }
+    return result;
   }
 
   // ── Module Edges ────────────────────────────────────────────────────
@@ -310,6 +458,35 @@ export class NexusStore {
         "SELECT * FROM module_edges WHERE kind IN ('import', 'dynamic-import', 'require') AND source = ? ORDER BY file_id, line",
       )
       .all(source) as (ModuleEdgeRow & { id: number })[];
+  }
+
+  getUnresolvedRelativeEdges(): { id: number; file_id: number; source: string }[] {
+    return this.db
+      .prepare(
+        `SELECT e.id, e.file_id, e.source
+         FROM module_edges e
+         WHERE e.resolved_file_id IS NULL
+           AND e.source IS NOT NULL
+           AND e.source LIKE '.%'`,
+      )
+      .all() as { id: number; file_id: number; source: string }[];
+  }
+
+  resolveEdge(edgeId: number, resolvedFileId: number): void {
+    this.db
+      .prepare('UPDATE module_edges SET resolved_file_id = ? WHERE id = ?')
+      .run(resolvedFileId, edgeId);
+  }
+
+  resolveEdgesBatch(updates: { edgeId: number; resolvedFileId: number }[]): void {
+    if (updates.length === 0) return;
+    const stmt = this.db.prepare('UPDATE module_edges SET resolved_file_id = ? WHERE id = ?');
+    const run = this.db.transaction((rows: typeof updates) => {
+      for (const { edgeId, resolvedFileId } of rows) {
+        stmt.run(resolvedFileId, edgeId);
+      }
+    });
+    run(updates);
   }
 
   // ── Occurrences ─────────────────────────────────────────────────────

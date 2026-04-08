@@ -12,6 +12,8 @@ export interface FileChange {
   action: 'add' | 'update' | 'delete' | 'hash_only' | 'unchanged';
   /** Computed SHA-256 hash (only for add/update) */
   hash?: string;
+  /** Pre-read source content (only for add/update, avoids double read in extractor) */
+  source?: string;
 }
 
 /**
@@ -20,6 +22,17 @@ export interface FileChange {
 export function hashFile(absolutePath: string): string {
   const content = fs.readFileSync(absolutePath);
   return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Read a file once and return both its SHA-256 hash and UTF-8 source.
+ * Eliminates the double-read where hashFile() and extractFile() each read separately.
+ */
+export function readAndHash(absolutePath: string): { hash: string; source: string } {
+  const buffer = fs.readFileSync(absolutePath);
+  const hash = createHash('sha256').update(buffer).digest('hex');
+  const source = buffer.toString('utf-8');
+  return { hash, source };
 }
 
 /**
@@ -52,9 +65,9 @@ export function detectChanges(
     const existing = dbByKey.get(pathKey);
 
     if (!existing) {
-      // New file
-      const hash = hashFile(file.absolutePath);
-      changes.push({ file, dbRow: null, action: 'add', hash });
+      // New file — read once for both hash and source
+      const { hash, source } = readAndHash(file.absolutePath);
+      changes.push({ file, dbRow: null, action: 'add', hash, source });
       continue;
     }
 
@@ -64,15 +77,15 @@ export function detectChanges(
       continue;
     }
 
-    // mtime or size changed — compute hash
-    const hash = hashFile(file.absolutePath);
+    // mtime or size changed — read once for both hash and source
+    const { hash, source } = readAndHash(file.absolutePath);
 
     if (hash === existing.hash) {
-      // Content didn't actually change — just update mtime/size
+      // Content didn't actually change — just update mtime/size (no source needed)
       changes.push({ file, dbRow: existing, action: 'hash_only', hash });
     } else {
-      // Content changed — needs re-parse
-      changes.push({ file, dbRow: existing, action: 'update', hash });
+      // Content changed — needs re-parse, keep source for extractor
+      changes.push({ file, dbRow: existing, action: 'update', hash, source });
     }
   }
 

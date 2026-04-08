@@ -46,9 +46,9 @@ function getSignature(node: Parser.SyntaxNode): string | null {
 
 /**
  * Build context string for an occurrence (surrounding line, capped 200 chars).
+ * Takes pre-split lines array to avoid re-splitting per occurrence.
  */
-function buildContext(source: string, line: number): string {
-  const lines = source.split('\n');
+function buildContext(lines: string[], line: number): string {
   if (line < 0 || line >= lines.length) return '';
   const lineText = lines[line].trim();
   return lineText.length > 200 ? lineText.slice(0, 200) : lineText;
@@ -874,6 +874,7 @@ const IGNORED_IDENTIFIERS = new Set([
 function extractOccurrences(root: Parser.SyntaxNode, source: string): OccOut[] {
   const occurrences: OccOut[] = [];
   const seen = new Set<string>(); // Dedup: "name:line:col"
+  const lines = source.split('\n');
 
   function walk(node: Parser.SyntaxNode): void {
     if (node.type === 'identifier' || node.type === 'type_identifier' || node.type === 'property_identifier') {
@@ -886,7 +887,7 @@ function extractOccurrences(root: Parser.SyntaxNode, source: string): OccOut[] {
             name,
             line: node.startPosition.row + 1,
             col: node.startPosition.column,
-            context: buildContext(source, node.startPosition.row),
+            context: buildContext(lines, node.startPosition.row),
             confidence: 'heuristic',
           });
         }

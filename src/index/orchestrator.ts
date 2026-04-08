@@ -9,9 +9,9 @@ import type { NexusConfig } from '../config.js';
 import { detectRoot, detectCaseSensitivity, getGitHead } from '../workspace/detector.js';
 import { buildIgnoreMatcher } from '../workspace/ignores.js';
 import { scanDirectory, buildExtraExtensions } from '../workspace/scanner.js';
-import { detectChanges, summarizeChanges } from '../workspace/changes.js';
+import { detectChanges, summarizeChanges, readAndHash } from '../workspace/changes.js';
 import type { FileChange } from '../workspace/changes.js';
-import { extractFile } from '../analysis/extractor.js';
+import { extractFile, extractSource } from '../analysis/extractor.js';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -93,18 +93,14 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
     });
 
     const dbFiles = mode === 'full' ? [] : store.getAllFiles();
-    const changes = mode === 'full'
-      ? scannedFiles.map(f => ({
-          file: f,
-          dbRow: null,
-          action: 'add' as const,
-          hash: hashFileSync(f.absolutePath),
-        }))
+    const changes: FileChange[] = mode === 'full'
+      ? scannedFiles.map(f => {
+          const { hash, source } = readAndHash(f.absolutePath);
+          return { file: f, dbRow: null, action: 'add' as const, hash, source };
+        })
       : detectChanges(scannedFiles, dbFiles, caseSensitive);
 
-    const summary = summarizeChanges(
-      mode === 'full' ? changes : changes,
-    );
+    const summary = summarizeChanges(changes);
 
     // Extract data for new/changed files
     const addBuffers: FileBuffer[] = [];
@@ -165,12 +161,7 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
     store.runInTransaction(() => {
       // Delete stale/updated files (CASCADE removes children)
       if (mode === 'full') {
-        // For full rebuild, delete ALL existing files
-        const allFiles = store.getAllFiles();
-        const allIds = allFiles.map(f => f.id);
-        if (allIds.length > 0) {
-          store.deleteFilesByIds(allIds);
-        }
+        store.deleteAllFiles();
       } else if (deleteIds.length > 0) {
         store.deleteFilesByIds(deleteIds);
       }
@@ -213,6 +204,9 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
       if (gitHead) store.setMeta('git_head', gitHead);
       store.setMeta('config_hash', configHash);
     });
+
+    // ── Phase 3: Resolve Import Edges ─────────────────────────────────
+    resolveImportEdges(store, caseSensitive);
 
     // Finalize index run
     const filesIndexed = addBuffers.length + updateBuffers.length;
@@ -279,7 +273,10 @@ function extractAndBuffer(
   indexedAt: string,
 ): FileBuffer | null {
   const file = change.file!;
-  const result = extractFile(file.absolutePath, file.path, file.language);
+  // Use pre-read source when available (avoids double file read)
+  const result = change.source
+    ? extractSource(change.source, file.path, file.language)
+    : extractFile(file.absolutePath, file.path, file.language);
 
   const pathKey = caseSensitive ? file.path : file.path.toLowerCase();
 
@@ -322,9 +319,86 @@ function extractAndBuffer(
 }
 
 /**
- * Synchronous file hash (re-exported from changes module).
+ * Phase 3: Resolve relative import specifiers to file IDs.
+ * Looks up './utils' → files table path_key match for actual indexed file.
  */
-import { hashFile as hashFileSync } from '../workspace/changes.js';
+function resolveImportEdges(store: NexusStore, caseSensitive: boolean): void {
+  const unresolvedEdges = store.getUnresolvedRelativeEdges();
+  if (unresolvedEdges.length === 0) return;
+
+  // Build file path lookup: path_key → file id
+  const allFiles = store.getAllFiles();
+  const fileByPathKey = new Map<string, number>();
+  for (const f of allFiles) {
+    fileByPathKey.set(f.path_key, f.id);
+    // Also index normalized POSIX path
+    const posix = f.path.replace(/\\/g, '/');
+    const key = caseSensitive ? posix : posix.toLowerCase();
+    fileByPathKey.set(key, f.id);
+  }
+
+  // Build lookup from file_id → directory path (for resolving relative imports)
+  const fileDirById = new Map<number, string>();
+  for (const f of allFiles) {
+    const posix = f.path.replace(/\\/g, '/');
+    const dir = posix.includes('/') ? posix.slice(0, posix.lastIndexOf('/')) : '';
+    fileDirById.set(f.id, dir);
+  }
+
+  const updates: { edgeId: number; resolvedFileId: number }[] = [];
+
+  for (const edge of unresolvedEdges) {
+    const importerDir = fileDirById.get(edge.file_id);
+    if (importerDir === undefined) continue;
+
+    const resolvedId = resolveModulePath(edge.source, importerDir, caseSensitive, fileByPathKey);
+    if (resolvedId !== undefined) {
+      updates.push({ edgeId: edge.id, resolvedFileId: resolvedId });
+    }
+  }
+
+  store.resolveEdgesBatch(updates);
+}
+
+/** Common extensions to try when resolving import specifiers */
+const RESOLVE_EXTENSIONS = [
+  '', '.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs',
+  '/index.ts', '/index.tsx', '/index.js', '/index.jsx',
+  '.py', '.go', '.rs', '.java', '.cs', '.css',
+];
+
+/**
+ * Resolve a relative import specifier to a file ID.
+ * Tries the specifier as-is, then with common extensions appended.
+ */
+function resolveModulePath(
+  source: string,
+  importerDir: string,
+  caseSensitive: boolean,
+  fileByPathKey: Map<string, number>,
+): number | undefined {
+  // Normalize: join importer dir + relative specifier
+  const parts = (importerDir ? importerDir + '/' + source : source).split('/');
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (part === '.' || part === '') continue;
+    if (part === '..') {
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  const basePath = resolved.join('/');
+
+  for (const ext of RESOLVE_EXTENSIONS) {
+    const candidate = basePath + ext;
+    const key = caseSensitive ? candidate : candidate.toLowerCase();
+    const fileId = fileByPathKey.get(key);
+    if (fileId !== undefined) return fileId;
+  }
+
+  return undefined;
+}
 
 /**
  * Ensure a directory exists.

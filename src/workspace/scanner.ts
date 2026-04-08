@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { IgnoreMatcher } from './ignores.js';
 
 /**
@@ -43,7 +44,76 @@ export interface ScanOptions {
 }
 
 /**
+ * Try scanning via `git ls-files` for faster file discovery.
+ * Returns null if not a git repo or git is unavailable.
+ */
+function scanWithGit(
+  rootDir: string,
+  extensions: Record<string, string>,
+  options: ScanOptions,
+): ScannedFile[] | null {
+  const root = path.resolve(rootDir);
+
+  // Check if .git exists
+  try {
+    fs.statSync(path.join(root, '.git'));
+  } catch {
+    return null;
+  }
+
+  try {
+    // --cached: tracked files, --others: untracked, --exclude-standard: respect .gitignore
+    // -z: null-delimited output (handles filenames with spaces/special chars)
+    const output = execFileSync('git', [
+      'ls-files', '--cached', '--others', '--exclude-standard', '-z',
+    ], {
+      cwd: root,
+      maxBuffer: 50 * 1024 * 1024, // 50MB for very large repos
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    const files = output.split('\0').filter(f => f.length > 0);
+    const results: ScannedFile[] = [];
+
+    for (const relativePath of files) {
+      const posixPath = relativePath.replace(/\\/g, '/');
+      const ext = path.extname(posixPath).toLowerCase();
+      const language = extensions[ext];
+      if (!language) continue;
+
+      const fullPath = path.join(root, relativePath);
+
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (!stat.isFile()) continue;
+      if (stat.size > options.maxFileSize) continue;
+      if (stat.size > 1024 && isMinified(fullPath, stat.size, options.minifiedLineLength)) continue;
+
+      results.push({
+        path: posixPath,
+        absolutePath: fullPath,
+        language,
+        mtime: stat.mtimeMs,
+        size: stat.size,
+      });
+    }
+
+    return results;
+  } catch {
+    // git not installed or other error — fall back to directory walk
+    return null;
+  }
+}
+
+/**
  * Recursively scan a directory for indexable source files.
+ * Tries git ls-files first for speed, falls back to directory walk.
  * Applies ignore rules, skips oversized/minified files, detects language.
  */
 export function scanDirectory(
@@ -51,7 +121,6 @@ export function scanDirectory(
   isIgnored: IgnoreMatcher,
   options: ScanOptions,
 ): ScannedFile[] {
-  const results: ScannedFile[] = [];
   const root = path.resolve(rootDir);
 
   // Merge default + config extensions
@@ -59,6 +128,13 @@ export function scanDirectory(
   if (options.extraExtensions) {
     Object.assign(extensions, options.extraExtensions);
   }
+
+  // Fast path: use git ls-files if available
+  const gitResult = scanWithGit(root, extensions, options);
+  if (gitResult !== null) return gitResult;
+
+  // Fallback: recursive directory walk
+  const results: ScannedFile[] = [];
 
   function walk(dir: string): void {
     let entries: fs.Dirent[];

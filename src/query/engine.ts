@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { NexusStore } from '../db/store.js';
-import type { SymbolRow, FileRow, ModuleEdgeRow } from '../db/store.js';
+import type { SymbolRow, FileRow, ModuleEdgeRow, SymbolWithFile, OccurrenceWithFile, ImportEdgeWithFile } from '../db/store.js';
 import { getAllAdapters } from '../analysis/languages/registry.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
@@ -113,20 +113,15 @@ export class QueryEngine {
   find(name: string, kind?: string): NexusResult<SymbolResult> {
     const start = performance.now();
 
-    // Try exact match first
-    let rows = kind
-      ? this.store.getSymbolsByNameAndKind(name, kind)
-      : this.store.getSymbolsByName(name);
+    // Try exact match first (single JOIN query instead of N+1)
+    let joined = this.store.getSymbolsWithFile(name, kind);
 
     // Fall back to case-insensitive if exact match returns nothing
-    if (rows.length === 0) {
-      rows = this.store.getSymbolsByNameCaseInsensitive(name);
-      if (kind) {
-        rows = rows.filter(r => r.kind === kind);
-      }
+    if (joined.length === 0) {
+      joined = this.store.getSymbolsWithFileCaseInsensitive(name, kind);
     }
 
-    const results: SymbolResult[] = rows.map(row => this.symbolRowToResult(row));
+    const results: SymbolResult[] = joined.map(row => symbolWithFileToResult(row));
 
     return this.wrap('find', `find ${name}${kind ? ` --kind ${kind}` : ''}`, results, start);
   }
@@ -168,19 +163,16 @@ export class QueryEngine {
   occurrences(name: string): NexusResult<OccurrenceResult> {
     const start = performance.now();
 
-    const rows = this.store.getOccurrencesByName(name);
+    const rows = this.store.getOccurrencesWithFile(name);
 
-    const results: OccurrenceResult[] = rows.map(row => {
-      const file = this.store.getFileById(row.file_id)!;
-      return {
-        name: row.name,
-        file: file.path,
-        line: row.line,
-        col: row.col,
-        context: row.context ?? '',
-        confidence: row.confidence as 'exact' | 'heuristic',
-      };
-    });
+    const results: OccurrenceResult[] = rows.map(row => ({
+      name: row.name,
+      file: row.file_path,
+      line: row.line,
+      col: row.col,
+      context: row.context ?? '',
+      confidence: row.confidence as 'exact' | 'heuristic',
+    }));
 
     return this.wrap('occurrences', `refs ${name}`, results, start);
   }
@@ -226,16 +218,25 @@ export class QueryEngine {
   importers(source: string): NexusResult<ImporterResult> {
     const start = performance.now();
 
-    // Try exact match first
-    let rows = this.store.getImportsBySourceExact(source);
+    // Try resolved_file_id first (precise, uses indexed edges from Phase 3)
+    const targetFile = this.findFile(source);
+    let rows: ImportEdgeWithFile[] = [];
+    if (targetFile) {
+      rows = this.store.getImportersByResolvedFileId(targetFile.id);
+    }
+
+    // Fall back to source string matching if resolution didn't find anything
+    if (rows.length === 0) {
+      rows = this.store.getImportEdgesWithFile(source);
+    }
 
     // Fallback to substring match if no exact hits
     if (rows.length === 0) {
-      rows = this.store.getImportsBySourceLike(source);
+      rows = this.store.getImportEdgesWithFileLike(source);
     }
 
     // Group by file_id → one result per file
-    const byFile = new Map<number, typeof rows>();
+    const byFile = new Map<number, ImportEdgeWithFile[]>();
     for (const row of rows) {
       const arr = byFile.get(row.file_id) ?? [];
       arr.push(row);
@@ -243,17 +244,14 @@ export class QueryEngine {
     }
 
     const results: ImporterResult[] = [];
-    for (const [fileId, edges] of byFile) {
-      const file = this.store.getFileById(fileId);
-      if (!file) continue;
-
+    for (const [_fileId, edges] of byFile) {
       const names = edges
         .map(e => e.name ?? (e.is_star ? '*' : null))
         .filter((n): n is string => n !== null);
 
       results.push({
-        file: file.path,
-        language: file.language,
+        file: edges[0].file_path,
+        language: edges[0].file_language,
         source: edges[0].source ?? source,
         line: edges[0].line,
         names,
@@ -275,31 +273,20 @@ export class QueryEngine {
   tree(pathPrefix?: string): NexusResult<TreeEntry> {
     const start = performance.now();
 
-    let files = this.store.getAllFiles();
+    const prefix = pathPrefix ? normalizePath(pathPrefix) : undefined;
+    const treeRows = this.store.getTreeData(prefix);
 
-    if (pathPrefix) {
-      const prefix = normalizePath(pathPrefix);
-      files = files.filter(f => normalizePath(f.path).startsWith(prefix));
-    }
+    // Batch-fetch export names for all files in one query
+    const fileIds = treeRows.map(r => r.id);
+    const exportsByFile = this.store.getExportNamesByFileIds(fileIds);
 
-    // Sort by path for consistent tree output
-    files.sort((a, b) => a.path.localeCompare(b.path));
-
-    const results: TreeEntry[] = files.map(f => {
-      const exports = this.store.getExportsByFileId(f.id);
-      const exportNames = exports
-        .map(e => e.name ?? (e.is_default ? '<default>' : e.is_star ? '*' : null))
-        .filter((n): n is string => n !== null);
-      const symbolCount = this.store.getSymbolsByFileId(f.id).length;
-
-      return {
-        path: f.path,
-        language: f.language,
-        symbol_count: symbolCount,
-        exports: exportNames,
-        status: f.status as 'indexed' | 'skipped' | 'error',
-      };
-    });
+    const results: TreeEntry[] = treeRows.map(f => ({
+      path: f.path,
+      language: f.language,
+      symbol_count: f.symbol_count,
+      exports: exportsByFile.get(f.id) ?? [],
+      status: f.status as 'indexed' | 'skipped' | 'error',
+    }));
 
     return this.wrap('tree', `tree${pathPrefix ? ` ${pathPrefix}` : ''}`, results, start);
   }
@@ -452,22 +439,6 @@ export class QueryEngine {
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
-  private symbolRowToResult(row: SymbolRow & { id: number }): SymbolResult {
-    const file = this.store.getFileById(row.file_id)!;
-    return {
-      name: row.name,
-      kind: row.kind,
-      file: file.path,
-      line: row.line,
-      col: row.col,
-      ...(row.end_line != null ? { end_line: row.end_line } : {}),
-      ...(row.signature ? { signature: row.signature } : {}),
-      ...(row.scope ? { scope: row.scope } : {}),
-      ...(row.doc ? { doc: row.doc } : {}),
-      language: file.language,
-    };
-  }
-
   /**
    * Find a file row by path or path_key. Tries exact match first,
    * then case-insensitive, then suffix match (for partial paths).
@@ -534,6 +505,21 @@ export class QueryEngine {
 }
 
 // ── Module-level helpers ──────────────────────────────────────────────
+
+function symbolWithFileToResult(row: SymbolWithFile): SymbolResult {
+  return {
+    name: row.name,
+    kind: row.kind,
+    file: row.file_path,
+    line: row.line,
+    col: row.col,
+    ...(row.end_line != null ? { end_line: row.end_line } : {}),
+    ...(row.signature ? { signature: row.signature } : {}),
+    ...(row.scope ? { scope: row.scope } : {}),
+    ...(row.doc ? { doc: row.doc } : {}),
+    language: row.file_language,
+  };
+}
 
 function edgeToResult(edge: ModuleEdgeRow & { id: number }): ModuleEdgeResult {
   return {

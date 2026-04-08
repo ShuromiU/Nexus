@@ -17,8 +17,7 @@ function getDoc(node: Parser.SyntaxNode): string | null {
   return null;
 }
 
-function buildContext(source: string, line: number): string {
-  const lines = source.split('\n');
+function buildContext(lines: string[], line: number): string {
   if (line < 0 || line >= lines.length) return '';
   const lineText = lines[line].trim();
   return lineText.length > 200 ? lineText.slice(0, 200) : lineText;
@@ -197,6 +196,7 @@ function extractSymbols(root: Parser.SyntaxNode, source: string): SymbolOut[] {
 function extractOccurrences(root: Parser.SyntaxNode, source: string): OccOut[] {
   const occurrences: OccOut[] = [];
   const seen = new Set<string>();
+  const lines = source.split('\n');
 
   function walk(node: Parser.SyntaxNode): void {
     // Track var() references to CSS custom properties
@@ -214,7 +214,7 @@ function extractOccurrences(root: Parser.SyntaxNode, source: string): OccOut[] {
                 name: varRef.text,
                 line: node.startPosition.row + 1,
                 col: node.startPosition.column,
-                context: buildContext(source, node.startPosition.row),
+                context: buildContext(lines, node.startPosition.row),
                 confidence: 'exact',
               });
             }
@@ -232,7 +232,7 @@ function extractOccurrences(root: Parser.SyntaxNode, source: string): OccOut[] {
           name: node.text,
           line: node.startPosition.row + 1,
           col: node.startPosition.column,
-          context: buildContext(source, node.startPosition.row),
+          context: buildContext(lines, node.startPosition.row),
           confidence: 'exact',
         });
       }
