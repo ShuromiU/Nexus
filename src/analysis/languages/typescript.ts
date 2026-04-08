@@ -601,6 +601,28 @@ function extractDynamicImportsAndRequires(node: Parser.SyntaxNode, edges: EdgeOu
       }
       return;
     }
+
+    // require.resolve(): require.resolve('./foo')
+    if (fn?.type === 'member_expression') {
+      const obj = fn.childForFieldName('object');
+      const prop = fn.childForFieldName('property');
+      if (obj?.type === 'identifier' && obj.text === 'require' && prop?.text === 'resolve') {
+        const source = extractCallSource(node);
+        if (source) {
+          edges.push({
+            kind: 'require',
+            name: null,
+            alias: null,
+            source,
+            line: node.startPosition.row + 1,
+            is_default: false,
+            is_star: false,
+            is_type: false,
+          });
+        }
+        return;
+      }
+    }
   }
 
   for (let i = 0; i < node.childCount; i++) {

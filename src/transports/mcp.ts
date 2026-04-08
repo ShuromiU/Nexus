@@ -28,7 +28,7 @@ let db: Database.Database | null = null;
 let engine: QueryEngine | null = null;
 let indexRootDir: string | null = null;
 let lastFreshnessCheck = 0;
-const FRESHNESS_INTERVAL = 30_000; // 30 seconds
+const FRESHNESS_INTERVAL = parseInt(process.env.NEXUS_FRESHNESS_INTERVAL ?? '30000', 10); // ms, default 30s
 
 function getEngine(): QueryEngine {
   if (engine) return engine;

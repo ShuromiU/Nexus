@@ -601,6 +601,20 @@ describe('require() extraction', () => {
     expect(reqs).toHaveLength(1);
     expect(reqs[0].source).toBe('fs');
   });
+
+  it('extracts require.resolve()', () => {
+    const result = extractSource(
+      `const p = require.resolve('./plugin');\nconst q = require.resolve('eslint');`,
+      'test.js',
+      'javascript',
+    );
+    if (!result.parsed) return;
+
+    const reqs = result.edges.filter(e => e.kind === 'require');
+    expect(reqs).toHaveLength(2);
+    expect(reqs[0].source).toBe('./plugin');
+    expect(reqs[1].source).toBe('eslint');
+  });
 });
 
 // ── Occurrence Tests ────────────────────────────────────────────────────
