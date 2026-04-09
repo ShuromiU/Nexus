@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type Database from 'better-sqlite3';
 import { NexusStore } from '../db/store.js';
 import type { SymbolRow, FileRow, ModuleEdgeRow, SymbolWithFile, OccurrenceWithFile, ImportEdgeWithFile } from '../db/store.js';
@@ -9,7 +11,7 @@ import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './rank
 
 export interface NexusResult<T> {
   query: string;
-  type: 'find' | 'occurrences' | 'exports' | 'imports' | 'tree' | 'search' | 'stats';
+  type: 'find' | 'occurrences' | 'exports' | 'imports' | 'tree' | 'search' | 'stats' | 'grep' | 'outline' | 'source' | 'deps';
   results: T[];
   count: number;
   suggestions?: string[];
@@ -62,6 +64,15 @@ export interface ImporterResult {
   is_star: boolean;
 }
 
+export interface GrepResult {
+  file: string;
+  line: number;
+  col: number;
+  match: string;
+  context: string;
+  language: string;
+}
+
 export interface TreeEntry {
   path: string;
   language: string;
@@ -93,6 +104,51 @@ export interface IndexStats {
   last_indexed_at: string;
   schema_version: number;
   extractor_version: number;
+}
+
+export interface OutlineEntry {
+  name: string;
+  kind: string;
+  line: number;
+  end_line?: number;
+  signature?: string;
+  doc_summary?: string;
+  children?: OutlineEntry[];
+}
+
+export interface OutlineResult {
+  file: string;
+  language: string;
+  lines: number;
+  imports: { source: string; names: string[]; is_type: boolean }[];
+  exports: string[];
+  outline: OutlineEntry[];
+}
+
+export interface SourceResult {
+  name: string;
+  kind: string;
+  file: string;
+  line: number;
+  end_line: number;
+  language: string;
+  source: string;
+  signature?: string;
+  doc?: string;
+}
+
+export interface DepNode {
+  file: string;
+  language: string;
+  exports?: string[];
+  deps: DepNode[];
+}
+
+export interface DepsResult {
+  root: string;
+  direction: 'imports' | 'importers';
+  depth: number;
+  tree: DepNode;
 }
 
 // ── Query Engine ──────────────────────────────────────────────────────
@@ -387,6 +443,63 @@ export class QueryEngine {
   }
 
   /**
+   * Search file contents with regex. Reads indexed files from disk
+   * (respects ignore rules via the files table). Use for string literals,
+   * CSS values, comments, config values — anything not a symbol name.
+   */
+  grep(pattern: string, pathPrefix?: string, language?: string, limit = 50): NexusResult<GrepResult> {
+    const start = performance.now();
+
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, 'gi');
+    } catch {
+      return this.wrap('grep', `grep ${pattern}`, [], start);
+    }
+
+    const root = this.store.getMeta('root_path') ?? '';
+    const files = this.store.getFilePaths({
+      language: language ?? undefined,
+      pathPrefix: pathPrefix ?? undefined,
+    });
+
+    const results: GrepResult[] = [];
+
+    for (const file of files) {
+      if (results.length >= limit) break;
+
+      const absPath = path.resolve(root, file.path);
+      let content: string;
+      try {
+        content = fs.readFileSync(absPath, 'utf-8');
+      } catch {
+        continue; // file deleted since indexing, skip
+      }
+
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (results.length >= limit) break;
+
+        const line = lines[i];
+        regex.lastIndex = 0;
+        const m = regex.exec(line);
+        if (m) {
+          results.push({
+            file: file.path,
+            line: i + 1,
+            col: m.index,
+            match: m[0],
+            context: line.length > 200 ? line.slice(0, 200) : line,
+            language: file.language,
+          });
+        }
+      }
+    }
+
+    return this.wrap('grep', `grep ${pattern}`, results, start);
+  }
+
+  /**
    * Full index summary with per-language capabilities.
    */
   stats(): NexusResult<IndexStats> {
@@ -435,6 +548,256 @@ export class QueryEngine {
     };
 
     return this.wrap('stats', 'stats', [statsResult], start);
+  }
+
+  /**
+   * Structural outline of a file: symbols organized by scope, with signatures
+   * and line ranges. Replaces reading a full file to understand its structure.
+   */
+  outline(filePath: string): NexusResult<OutlineResult> {
+    const start = performance.now();
+    const file = this.findFile(filePath);
+
+    if (!file) {
+      return this.wrap('outline', `outline ${filePath}`, [], start);
+    }
+
+    // Get all symbols sorted by line
+    const symbols = this.store.getSymbolsByFileId(file.id);
+    symbols.sort((a, b) => a.line - b.line);
+
+    // Build import summary: group by source
+    const importEdges = this.store.getImportsByFileId(file.id);
+    const importMap = new Map<string, { names: string[]; is_type: boolean }>();
+    for (const edge of importEdges) {
+      const src = edge.source ?? '<unknown>';
+      const existing = importMap.get(src) ?? { names: [], is_type: true };
+      if (edge.name) existing.names.push(edge.name);
+      else if (edge.is_star) existing.names.push('*');
+      if (!edge.is_type) existing.is_type = false;
+      importMap.set(src, existing);
+    }
+    const imports = [...importMap.entries()].map(([source, info]) => ({
+      source,
+      names: info.names,
+      is_type: info.is_type,
+    }));
+
+    // Build export list
+    const exportEdges = this.store.getExportsByFileId(file.id);
+    const exportNames = exportEdges
+      .map(e => e.name ?? (e.is_default ? '<default>' : e.is_star ? '*' : null))
+      .filter((n): n is string => n !== null);
+
+    // Build symbol tree: scope=null → top-level, else child of parent
+    const topLevel: OutlineEntry[] = [];
+    const byName = new Map<string, OutlineEntry>();
+
+    for (const sym of symbols) {
+      const entry: OutlineEntry = {
+        name: sym.name,
+        kind: sym.kind,
+        line: sym.line,
+        ...(sym.end_line != null ? { end_line: sym.end_line } : {}),
+        ...(sym.signature ? { signature: sym.signature } : {}),
+        ...(sym.doc ? { doc_summary: sym.doc.split('\n')[0].replace(/^\/\*\*?\s*/, '').replace(/\s*\*\/$/, '').trim() } : {}),
+      };
+
+      if (!sym.scope) {
+        topLevel.push(entry);
+        byName.set(sym.name, entry);
+      } else {
+        const parent = byName.get(sym.scope);
+        if (parent) {
+          if (!parent.children) parent.children = [];
+          parent.children.push(entry);
+        } else {
+          topLevel.push(entry);
+        }
+      }
+    }
+
+    // Count lines from disk
+    const root = this.store.getMeta('root_path') ?? '';
+    let lineCount = 0;
+    try {
+      const content = fs.readFileSync(path.resolve(root, file.path), 'utf-8');
+      lineCount = content.split('\n').length;
+    } catch {
+      // File may have been deleted since indexing
+    }
+
+    const result: OutlineResult = {
+      file: file.path,
+      language: file.language,
+      lines: lineCount,
+      imports,
+      exports: exportNames,
+      outline: topLevel,
+    };
+
+    return this.wrap('outline', `outline ${filePath}`, [result], start);
+  }
+
+  /**
+   * Extract source code for a specific symbol. Returns just the lines where
+   * the symbol is defined, avoiding full file reads.
+   */
+  source(name: string, filePath?: string): NexusResult<SourceResult> {
+    const start = performance.now();
+
+    // Find matching symbols
+    let joined = this.store.getSymbolsWithFile(name);
+    if (joined.length === 0) {
+      joined = this.store.getSymbolsWithFileCaseInsensitive(name);
+    }
+
+    // Filter by file if specified
+    if (filePath && joined.length > 0) {
+      const normalized = normalizePath(filePath);
+      const filtered = joined.filter(s =>
+        normalizePath(s.file_path).endsWith(normalized),
+      );
+      if (filtered.length > 0) joined = filtered;
+    }
+
+    const root = this.store.getMeta('root_path') ?? '';
+    const results: SourceResult[] = [];
+
+    // Group by file to avoid re-reading
+    const byFile = new Map<string, typeof joined>();
+    for (const sym of joined) {
+      const arr = byFile.get(sym.file_path) ?? [];
+      arr.push(sym);
+      byFile.set(sym.file_path, arr);
+    }
+
+    for (const [fp, syms] of byFile) {
+      let lines: string[];
+      try {
+        const content = fs.readFileSync(path.resolve(root, fp), 'utf-8');
+        lines = content.split('\n');
+      } catch {
+        continue; // File deleted since indexing
+      }
+
+      // All symbols in this file, sorted by line (for end_line fallback)
+      const allFileSymbols = this.store.getSymbolsByFileId(syms[0].file_id);
+      allFileSymbols.sort((a, b) => a.line - b.line);
+
+      for (const sym of syms) {
+        const startLine = sym.line;
+        let endLine = sym.end_line;
+
+        if (endLine == null) {
+          const idx = allFileSymbols.findIndex(s => s.id === sym.id);
+          if (idx >= 0 && idx < allFileSymbols.length - 1) {
+            endLine = allFileSymbols[idx + 1].line - 1;
+          } else {
+            endLine = Math.min(startLine + 49, lines.length);
+          }
+        }
+
+        const sourceCode = lines.slice(startLine - 1, endLine).join('\n');
+
+        results.push({
+          name: sym.name,
+          kind: sym.kind,
+          file: fp,
+          line: startLine,
+          end_line: endLine,
+          language: sym.file_language,
+          source: sourceCode,
+          ...(sym.signature ? { signature: sym.signature } : {}),
+          ...(sym.doc ? { doc: sym.doc } : {}),
+        });
+      }
+    }
+
+    results.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+
+    return this.wrap('source', `source ${name}${filePath ? ` --file ${filePath}` : ''}`, results, start);
+  }
+
+  /**
+   * Transitive dependency graph from a file. Follows imports or importers
+   * up to a given depth. Replaces multiple sequential import/importer calls.
+   */
+  deps(filePath: string, direction: 'imports' | 'importers' = 'imports', depth = 2): NexusResult<DepsResult> {
+    const start = performance.now();
+    const file = this.findFile(filePath);
+
+    if (!file) {
+      return this.wrap('deps', `deps ${filePath}`, [], start);
+    }
+
+    const maxDepth = Math.min(depth, 5);
+    const visited = new Set<number>();
+    const nodeMap = new Map<number, DepNode>();
+
+    const buildNode = (fileId: number, currentDepth: number): DepNode => {
+      const f = this.store.getFileById(fileId);
+      if (!f) return { file: '<unknown>', language: '', deps: [] };
+
+      visited.add(fileId);
+      const node: DepNode = {
+        file: f.path,
+        language: f.language,
+        deps: [],
+      };
+      nodeMap.set(fileId, node);
+
+      if (currentDepth >= maxDepth) return node;
+
+      let targetIds: number[];
+      if (direction === 'imports') {
+        const edges = this.store.getImportsByFileId(fileId);
+        targetIds = [...new Set(
+          edges
+            .map(e => e.resolved_file_id)
+            .filter((id): id is number => id != null && !visited.has(id)),
+        )];
+      } else {
+        const importerEdges = this.store.getImportersByResolvedFileId(fileId);
+        targetIds = [...new Set(
+          importerEdges
+            .map(e => e.file_id)
+            .filter(id => !visited.has(id)),
+        )];
+      }
+
+      // Mark all targets as visited before processing to preserve
+      // direct dependencies (prevent deep traversal from stealing them)
+      for (const id of targetIds) {
+        visited.add(id);
+      }
+
+      for (const targetId of targetIds) {
+        node.deps.push(buildNode(targetId, currentDepth + 1));
+      }
+
+      return node;
+    };
+
+    const tree = buildNode(file.id, 0);
+
+    // Batch-fetch exports for all visited files
+    const exportsByFile = this.store.getExportNamesByFileIds([...nodeMap.keys()]);
+    for (const [fileId, names] of exportsByFile) {
+      const node = nodeMap.get(fileId);
+      if (node && names.length > 0) {
+        node.exports = names;
+      }
+    }
+
+    const result: DepsResult = {
+      root: file.path,
+      direction,
+      depth: maxDepth,
+      tree,
+    };
+
+    return this.wrap('deps', `deps ${filePath}`, [result], start);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────

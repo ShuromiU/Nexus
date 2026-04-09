@@ -185,6 +185,56 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_grep',
+          description: 'Search file contents with regex. Searches indexed files only (respects ignore rules). Use for string literals, CSS values, comments, config values, regex patterns — anything that is not a symbol name.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              pattern: { type: 'string', description: 'Regex pattern to search for (JavaScript regex syntax)' },
+              path: { type: 'string', description: 'Optional path prefix to narrow search (e.g. "src/components")' },
+              language: { type: 'string', description: 'Optional language filter (typescript, python, go, rust, java, csharp, css)' },
+              limit: { type: 'number', description: 'Max results (default: 50)' },
+            },
+            required: ['pattern'],
+          },
+        },
+        {
+          name: 'nexus_outline',
+          description: 'Structural outline of a file: all symbols organized by scope with signatures and line ranges. Replaces reading a full file to understand its structure. Returns imports, exports, and a nested symbol tree.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              file: { type: 'string', description: 'File path (relative or absolute, supports partial/suffix match)' },
+            },
+            required: ['file'],
+          },
+        },
+        {
+          name: 'nexus_source',
+          description: 'Extract the source code for a specific symbol (function, class, type, etc.) without reading the entire file. Returns just the relevant lines with file location.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol name to extract source for' },
+              file: { type: 'string', description: 'Optional file path to narrow results when the symbol exists in multiple files' },
+            },
+            required: ['name'],
+          },
+        },
+        {
+          name: 'nexus_deps',
+          description: 'Transitive dependency graph from a file. Follows imports or reverse-imports up to a given depth, returning a tree with export summaries. Replaces multiple sequential nexus_imports/nexus_importers calls.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              file: { type: 'string', description: 'File path (relative or absolute, supports partial/suffix match)' },
+              direction: { type: 'string', enum: ['imports', 'importers'], description: 'Direction: "imports" (default) follows what the file imports; "importers" follows what imports the file' },
+              depth: { type: 'number', description: 'Max traversal depth (default: 2, max: 5)' },
+            },
+            required: ['file'],
+          },
+        },
+        {
           name: 'nexus_stats',
           description: 'Full index summary: file counts, symbol totals, per-language capabilities, index status and health.',
           inputSchema: {
@@ -269,6 +319,32 @@ export function createMcpServer(): Server {
         case 'nexus_symbols': {
           const { file, kind } = args as { file: string; kind?: string };
           const result = qe.symbols(file, kind);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        }
+
+        case 'nexus_grep': {
+          const { pattern, path: pathPrefix, language, limit } = args as {
+            pattern: string; path?: string; language?: string; limit?: number;
+          };
+          const result = qe.grep(pattern, pathPrefix, language, limit);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        }
+
+        case 'nexus_outline': {
+          const { file } = args as { file: string };
+          const result = qe.outline(file);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        }
+
+        case 'nexus_source': {
+          const { name: symbolName, file } = args as { name: string; file?: string };
+          const result = qe.source(symbolName, file);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        }
+
+        case 'nexus_deps': {
+          const { file, direction, depth } = args as { file: string; direction?: 'imports' | 'importers'; depth?: number };
+          const result = qe.deps(file, direction, depth);
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         }
 

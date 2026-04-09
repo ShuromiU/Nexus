@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { applySchema, initializeMeta, SCHEMA_VERSION, EXTRACTOR_VERSION } from '../src/db/schema.js';
@@ -598,6 +601,310 @@ describe('QueryEngine', () => {
     it('reports index health', () => {
       const stats = engine.stats().results[0];
       expect(stats.index_health).toBe('partial'); // has error file
+    });
+  });
+
+  // ── outline ────────────────────────────────────────────────────────
+
+  describe('outline', () => {
+    it('returns outline with imports, exports, and symbol tree', () => {
+      const result = engine.outline('src/utils.ts');
+      expect(result.type).toBe('outline');
+      expect(result.count).toBe(1);
+
+      const o = result.results[0];
+      expect(o.file).toBe('src/utils.ts');
+      expect(o.language).toBe('typescript');
+    });
+
+    it('groups imports by source', () => {
+      const o = engine.outline('src/components/Button.tsx').results[0];
+      expect(o.imports.length).toBe(2); // react, ../utils
+      const reactImport = o.imports.find(i => i.source === 'react');
+      expect(reactImport).toBeDefined();
+      expect(reactImport!.names).toContain('React');
+    });
+
+    it('lists export names', () => {
+      const o = engine.outline('src/utils.ts').results[0];
+      expect(o.exports).toContain('formatDate');
+      expect(o.exports).toContain('parseDate');
+      expect(o.exports).toContain('DateFormat');
+      expect(o.exports).toContain('helper');
+    });
+
+    it('builds nested symbol tree by scope', () => {
+      const o = engine.outline('src/components/Button.tsx').results[0];
+      // Button is top-level, useButtonState has scope: 'Button'
+      const button = o.outline.find(e => e.name === 'Button');
+      expect(button).toBeDefined();
+      expect(button!.children).toBeDefined();
+      expect(button!.children!.length).toBe(1);
+      expect(button!.children![0].name).toBe('useButtonState');
+    });
+
+    it('includes signature and doc_summary', () => {
+      const o = engine.outline('src/utils.ts').results[0];
+      const fmt = o.outline.find(e => e.name === 'formatDate');
+      expect(fmt!.signature).toBe('(date: Date) => string');
+      expect(fmt!.doc_summary).toBe('Formats a date');
+    });
+
+    it('includes end_line when present', () => {
+      const o = engine.outline('src/components/Button.tsx').results[0];
+      const button = o.outline.find(e => e.name === 'Button');
+      expect(button!.end_line).toBe(30);
+    });
+
+    it('returns empty for non-existent file', () => {
+      const result = engine.outline('no/such/file.ts');
+      expect(result.count).toBe(0);
+    });
+
+    it('lines is 0 when file not on disk', () => {
+      // In-memory test DB has root_path=/test/project, files don't exist
+      const o = engine.outline('src/utils.ts').results[0];
+      expect(o.lines).toBe(0);
+    });
+  });
+
+  // ── source ─────────────────────────────────────────────────────────
+
+  describe('source', () => {
+    let tmpDir: string;
+    let srcDb: Database.Database;
+    let srcEngine: QueryEngine;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-test-'));
+      const srcDir = path.join(tmpDir, 'src');
+      fs.mkdirSync(srcDir, { recursive: true });
+
+      fs.writeFileSync(path.join(srcDir, 'utils.ts'), [
+        'const MAX_RETRIES = 3;',
+        '',
+        'type DateFormat = string;',
+        '',
+        'export function formatDate(date: Date): string {',
+        '  return date.toISOString();',
+        '}',
+        '',
+        'export function parseDate(input: string): Date {',
+        '  return new Date(input);',
+        '}',
+      ].join('\n'));
+
+      srcDb = createTestDb();
+      const s = new NexusStore(srcDb);
+      s.setMeta('root_path', tmpDir);
+
+      const fileId = s.insertFile({
+        path: 'src/utils.ts',
+        path_key: 'src/utils.ts',
+        hash: 'abc',
+        mtime: 1,
+        size: 200,
+        language: 'typescript',
+        status: 'indexed',
+        indexed_at: '2026-04-07T12:00:00Z',
+      });
+
+      s.insertSymbols([
+        { file_id: fileId, name: 'MAX_RETRIES', kind: 'constant', line: 1, col: 0 },
+        { file_id: fileId, name: 'DateFormat', kind: 'type', line: 3, col: 0 },
+        { file_id: fileId, name: 'formatDate', kind: 'function', line: 5, col: 0, end_line: 7, signature: '(date: Date) => string', doc: 'Formats a date' },
+        { file_id: fileId, name: 'parseDate', kind: 'function', line: 9, col: 0, end_line: 11, signature: '(input: string) => Date' },
+      ]);
+
+      s.insertIndexRun({
+        started_at: '2026-04-07T12:00:00Z',
+        completed_at: '2026-04-07T12:00:01Z',
+        mode: 'full',
+        files_scanned: 1,
+        files_indexed: 1,
+        files_skipped: 0,
+        files_errored: 0,
+        status: 'completed',
+      });
+
+      srcEngine = new QueryEngine(srcDb);
+    });
+
+    afterEach(() => {
+      srcDb.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('extracts source for a symbol with end_line', () => {
+      const result = srcEngine.source('formatDate');
+      expect(result.type).toBe('source');
+      expect(result.count).toBe(1);
+      expect(result.results[0].name).toBe('formatDate');
+      expect(result.results[0].line).toBe(5);
+      expect(result.results[0].end_line).toBe(7);
+      expect(result.results[0].source).toContain('function formatDate');
+      expect(result.results[0].source).toContain('return date.toISOString()');
+      expect(result.results[0].signature).toBe('(date: Date) => string');
+      expect(result.results[0].doc).toBe('Formats a date');
+    });
+
+    it('handles missing end_line with next-symbol fallback', () => {
+      const result = srcEngine.source('MAX_RETRIES');
+      expect(result.count).toBe(1);
+      expect(result.results[0].line).toBe(1);
+      // Next symbol (DateFormat) is at line 3, so end_line = 2
+      expect(result.results[0].end_line).toBe(2);
+      expect(result.results[0].source).toContain('MAX_RETRIES');
+    });
+
+    it('handles last symbol without end_line (caps at 50 lines)', () => {
+      // parseDate has end_line set, but let's test a symbol that's last
+      // MAX_RETRIES → DateFormat → formatDate → parseDate
+      // parseDate has end_line=11, so it's not the case here.
+      // Add a symbol at the end with no end_line
+      const s = new NexusStore(srcDb);
+      const fileId = s.getFileByPathKey('src/utils.ts')!.id;
+      s.insertSymbols([
+        { file_id: fileId, name: 'LAST_CONST', kind: 'constant', line: 11, col: 0 },
+      ]);
+
+      const result = srcEngine.source('LAST_CONST');
+      expect(result.count).toBe(1);
+      // Last symbol in file, no next symbol at a higher line, caps at line 11
+      expect(result.results[0].end_line).toBe(11);
+    });
+
+    it('filters by file path', () => {
+      const result = srcEngine.source('formatDate', 'utils.ts');
+      expect(result.count).toBe(1);
+      expect(result.results[0].file).toBe('src/utils.ts');
+    });
+
+    it('returns empty for non-existent symbol', () => {
+      const result = srcEngine.source('nonExistent');
+      expect(result.count).toBe(0);
+    });
+
+    it('query string includes file when provided', () => {
+      const result = srcEngine.source('formatDate', 'utils.ts');
+      expect(result.query).toBe('source formatDate --file utils.ts');
+    });
+  });
+
+  // ── deps ───────────────────────────────────────────────────────────
+
+  describe('deps', () => {
+    let depsDb: Database.Database;
+    let depsEngine: QueryEngine;
+
+    beforeEach(() => {
+      depsDb = createTestDb();
+      const s = new NexusStore(depsDb);
+
+      // Create files: A → B, A → C, B → C
+      const fileA = s.insertFile({
+        path: 'src/a.ts', path_key: 'src/a.ts', hash: 'a', mtime: 1, size: 100,
+        language: 'typescript', status: 'indexed', indexed_at: '2026-04-07T12:00:00Z',
+      });
+      const fileB = s.insertFile({
+        path: 'src/b.ts', path_key: 'src/b.ts', hash: 'b', mtime: 1, size: 100,
+        language: 'typescript', status: 'indexed', indexed_at: '2026-04-07T12:00:00Z',
+      });
+      const fileC = s.insertFile({
+        path: 'src/c.ts', path_key: 'src/c.ts', hash: 'c', mtime: 1, size: 100,
+        language: 'typescript', status: 'indexed', indexed_at: '2026-04-07T12:00:00Z',
+      });
+
+      // A → B, A → C (resolved edges)
+      s.insertModuleEdges([
+        { file_id: fileA, kind: 'import', name: 'foo', source: './b', line: 1, is_default: false, is_star: false, is_type: false, resolved_file_id: fileB },
+        { file_id: fileA, kind: 'import', name: 'bar', source: './c', line: 2, is_default: false, is_star: false, is_type: false, resolved_file_id: fileC },
+      ]);
+      // B → C (resolved edge)
+      s.insertModuleEdges([
+        { file_id: fileB, kind: 'import', name: 'baz', source: './c', line: 1, is_default: false, is_star: false, is_type: false, resolved_file_id: fileC },
+      ]);
+      // Exports
+      s.insertModuleEdges([
+        { file_id: fileB, kind: 'export', name: 'foo', line: 5, is_default: false, is_star: false, is_type: false },
+        { file_id: fileC, kind: 'export', name: 'bar', line: 5, is_default: false, is_star: false, is_type: false },
+        { file_id: fileC, kind: 'export', name: 'baz', line: 6, is_default: false, is_star: false, is_type: false },
+      ]);
+
+      s.insertIndexRun({
+        started_at: '2026-04-07T12:00:00Z', completed_at: '2026-04-07T12:00:01Z',
+        mode: 'full', files_scanned: 3, files_indexed: 3, files_skipped: 0, files_errored: 0, status: 'completed',
+      });
+
+      depsEngine = new QueryEngine(depsDb);
+    });
+
+    afterEach(() => {
+      depsDb.close();
+    });
+
+    it('returns import tree with direct dependencies', () => {
+      const result = depsEngine.deps('src/a.ts');
+      expect(result.type).toBe('deps');
+      expect(result.count).toBe(1);
+
+      const tree = result.results[0].tree;
+      expect(tree.file).toBe('src/a.ts');
+      expect(tree.deps.length).toBe(2);
+      const depFiles = tree.deps.map(d => d.file).sort();
+      expect(depFiles).toEqual(['src/b.ts', 'src/c.ts']);
+    });
+
+    it('includes export names in nodes', () => {
+      const result = depsEngine.deps('src/a.ts');
+      const tree = result.results[0].tree;
+      const nodeB = tree.deps.find(d => d.file === 'src/b.ts')!;
+      expect(nodeB.exports).toContain('foo');
+    });
+
+    it('prevents cycles with visited set', () => {
+      // C is reachable from both A→C and A→B→C
+      // With pre-marking, both B and C are direct deps of A
+      // B won't show C again since C is already visited
+      const result = depsEngine.deps('src/a.ts', 'imports', 3);
+      const tree = result.results[0].tree;
+      const nodeB = tree.deps.find(d => d.file === 'src/b.ts')!;
+      // C was pre-marked as visited when A's targets were collected
+      expect(nodeB.deps.length).toBe(0);
+    });
+
+    it('respects depth limit', () => {
+      const result = depsEngine.deps('src/a.ts', 'imports', 1);
+      const tree = result.results[0].tree;
+      // At depth 1, children exist but have no deps explored
+      for (const dep of tree.deps) {
+        expect(dep.deps.length).toBe(0);
+      }
+    });
+
+    it('follows importers direction (reverse)', () => {
+      const result = depsEngine.deps('src/c.ts', 'importers');
+      const tree = result.results[0].tree;
+      expect(tree.file).toBe('src/c.ts');
+      // Both A and B import C
+      const depFiles = tree.deps.map(d => d.file).sort();
+      expect(depFiles).toEqual(['src/a.ts', 'src/b.ts']);
+    });
+
+    it('returns empty for non-existent file', () => {
+      const result = depsEngine.deps('no/such/file.ts');
+      expect(result.count).toBe(0);
+    });
+
+    it('caps depth at 5', () => {
+      const result = depsEngine.deps('src/a.ts', 'imports', 100);
+      expect(result.results[0].depth).toBe(5);
+    });
+
+    it('handles file with no resolved imports', () => {
+      const result = depsEngine.deps('src/c.ts', 'imports');
+      const tree = result.results[0].tree;
+      expect(tree.deps.length).toBe(0);
     });
   });
 });

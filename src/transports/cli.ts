@@ -10,7 +10,8 @@ import { repair } from '../db/integrity.js';
 import { detectRoot, detectCaseSensitivity } from '../workspace/detector.js';
 import type {
   SymbolResult, OccurrenceResult, ModuleEdgeResult,
-  TreeEntry, IndexStats, NexusResult, ImporterResult,
+  TreeEntry, IndexStats, NexusResult, ImporterResult, GrepResult,
+  OutlineResult, SourceResult, DepsResult,
 } from '../query/engine.js';
 
 // Side-effect: register all language adapters
@@ -105,6 +106,17 @@ function formatTree(results: TreeEntry[]): string {
   return lines.join('\n');
 }
 
+function formatGrepResults(results: GrepResult[]): string {
+  if (results.length === 0) return 'No matches found.';
+
+  const lines: string[] = [];
+  for (const r of results) {
+    lines.push(`  ${r.file}:${r.line}:${r.col}`);
+    lines.push(`    ${r.context.trim()}`);
+  }
+  return lines.join('\n');
+}
+
 function formatStats(stats: IndexStats): string {
   const lines: string[] = [];
 
@@ -133,6 +145,85 @@ function formatStats(stats: IndexStats): string {
     }
   }
 
+  return lines.join('\n');
+}
+
+function formatOutline(result: OutlineResult): string {
+  const lines: string[] = [];
+  lines.push(`  ${result.file}  (${result.language}, ${result.lines} lines)`);
+  lines.push('');
+
+  if (result.imports.length > 0) {
+    lines.push('  Imports:');
+    for (const imp of result.imports) {
+      const typeFlag = imp.is_type ? ' [type]' : '';
+      const names = imp.names.length > 0 ? `{ ${imp.names.join(', ')} }` : '<side-effect>';
+      lines.push(`    ${names} from '${imp.source}'${typeFlag}`);
+    }
+    lines.push('');
+  }
+
+  if (result.exports.length > 0) {
+    lines.push(`  Exports: ${result.exports.join(', ')}`);
+    lines.push('');
+  }
+
+  const formatEntry = (entry: OutlineResult['outline'][0], indent: number) => {
+    const pad = '  '.repeat(indent);
+    const range = entry.end_line ? `:${entry.line}-${entry.end_line}` : `:${entry.line}`;
+    const sig = entry.signature ? ` ${entry.signature}` : '';
+    const doc = entry.doc_summary ? `  — ${entry.doc_summary}` : '';
+    lines.push(`${pad}${entry.kind.padEnd(12)} ${entry.name}${sig}${range}${doc}`);
+    if (entry.children) {
+      for (const child of entry.children) {
+        formatEntry(child, indent + 1);
+      }
+    }
+  };
+
+  for (const entry of result.outline) {
+    formatEntry(entry, 1);
+  }
+
+  return lines.join('\n');
+}
+
+function formatSource(results: SourceResult[]): string {
+  if (results.length === 0) return 'No matching symbols found.';
+
+  const lines: string[] = [];
+  for (const r of results) {
+    const sig = r.signature ? ` ${r.signature}` : '';
+    lines.push(`  ── ${r.kind} ${r.name}${sig}  ${r.file}:${r.line}-${r.end_line}`);
+    if (r.doc) {
+      lines.push(`  ${r.doc}`);
+    }
+    lines.push('');
+    for (const srcLine of r.source.split('\n')) {
+      lines.push(`  ${srcLine}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+function formatDeps(result: DepsResult): string {
+  const lines: string[] = [];
+  lines.push(`  ${result.direction === 'imports' ? 'Dependencies' : 'Dependents'} of ${result.root} (depth: ${result.depth})`);
+  lines.push('');
+
+  const formatNode = (node: DepsResult['tree'], indent: number, isLast: boolean, prefix: string) => {
+    const connector = indent === 0 ? '' : (isLast ? '└── ' : '├── ');
+    const exports = node.exports && node.exports.length > 0 ? ` → ${node.exports.join(', ')}` : '';
+    lines.push(`${prefix}${connector}${node.file}  (${node.language})${exports}`);
+
+    const childPrefix = indent === 0 ? '  ' : prefix + (isLast ? '    ' : '│   ');
+    for (let i = 0; i < node.deps.length; i++) {
+      formatNode(node.deps[i], indent + 1, i === node.deps.length - 1, childPrefix);
+    }
+  };
+
+  formatNode(result.tree, 0, true, '  ');
   return lines.join('\n');
 }
 
@@ -338,6 +429,87 @@ export function createProgram(): Command {
       }
     });
 
+  // ── grep ──────────────────────────────────────────────────────────
+
+  program
+    .command('grep <pattern>')
+    .description('Search file contents with regex across all indexed files')
+    .option('-p, --path <prefix>', 'Path prefix filter')
+    .option('--lang <language>', 'Language filter')
+    .option('-l, --limit <n>', 'Max results', '50')
+    .action((pattern: string, opts: { path?: string; lang?: string; limit: string }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const limit = parseInt(opts.limit, 10) || 50;
+        const result = engine.grep(pattern, opts.path, opts.lang, limit);
+        printEnvelope(result, formatGrepResults(result.results));
+      } finally {
+        db.close();
+      }
+    });
+
+  // ── outline ───────────────────────────────────────────────────────
+
+  program
+    .command('outline <file>')
+    .description('Structural outline of a file — symbols, imports, exports')
+    .action((file: string) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.outline(file);
+        if (result.results.length > 0) {
+          printEnvelope(result, formatOutline(result.results[0]));
+        } else {
+          printEnvelope(result, 'File not found.');
+        }
+      } finally {
+        db.close();
+      }
+    });
+
+  // ── source ───────────────────────────────────────────────────────
+
+  program
+    .command('source <name>')
+    .description('Extract source code for a symbol')
+    .option('-f, --file <file>', 'Narrow to a specific file')
+    .action((name: string, opts: { file?: string }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.source(name, opts.file);
+        printEnvelope(result, formatSource(result.results));
+      } finally {
+        db.close();
+      }
+    });
+
+  // ── deps ─────────────────────────────────────────────────────────
+
+  program
+    .command('deps <file>')
+    .description('Show transitive dependency tree')
+    .option('-d, --direction <dir>', 'imports or importers', 'imports')
+    .option('--depth <n>', 'Max depth (1-5)', '2')
+    .action((file: string, opts: { direction: string; depth: string }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const direction = opts.direction === 'importers' ? 'importers' as const : 'imports' as const;
+        const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 2, 1), 5);
+        const result = engine.deps(file, direction, depth);
+        if (result.results.length > 0) {
+          printEnvelope(result, formatDeps(result.results[0]));
+        } else {
+          printEnvelope(result, 'File not found.');
+        }
+      } finally {
+        db.close();
+      }
+    });
+
   // ── stats ─────────────────────────────────────────────────────────
 
   program
@@ -400,7 +572,11 @@ export {
   formatEdges,
   formatImporters,
   formatTree,
+  formatGrepResults,
   formatStats,
+  formatOutline,
+  formatSource,
+  formatDeps,
 };
 
 // ── Main ──────────────────────────────────────────────────────────────

@@ -152,6 +152,23 @@ export class NexusStore {
     })[];
   }
 
+  getFilePaths(opts?: { language?: string; pathPrefix?: string }): { path: string; language: string }[] {
+    let sql = "SELECT path, language FROM files WHERE status = 'indexed'";
+    const params: unknown[] = [];
+
+    if (opts?.language) {
+      sql += ' AND language = ?';
+      params.push(opts.language);
+    }
+    if (opts?.pathPrefix) {
+      sql += " AND (path LIKE ? OR REPLACE(path, '\\', '/') LIKE ?)";
+      params.push(`${opts.pathPrefix}%`, `${opts.pathPrefix}%`);
+    }
+
+    sql += ' ORDER BY path';
+    return this.db.prepare(sql).all(...params) as { path: string; language: string }[];
+  }
+
   updateFileMtime(id: number, mtime: number, size: number): void {
     this.db
       .prepare('UPDATE files SET mtime = ?, size = ? WHERE id = ?')
