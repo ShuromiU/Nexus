@@ -67,28 +67,44 @@ Fast fire-and-forget INSERTs.
 The AI records meaningful interpretations via MCP tools — insights, decisions, user intent, blockers. Not every action, only what matters. ~30-50 tokens per note, 5-15 notes per session.
 
 Examples:
-- `cortex_note("insight", "auth.ts validates JWT but never checks token revocation")`
-- `cortex_note("decision", "chose JWT over sessions — stateless fits microservice arch", alternatives: ["sessions", "OAuth"])`
-- `cortex_note("intent", "user wants to refactor auth without breaking the API contract")`
-- `cortex_note("blocker", "can't test auth without mocking the token service")`
+- `cortex_note("insight", "auth.ts validates JWT but never checks token revocation")` — subject optional
+- `cortex_note("decision", "chose JWT over sessions — stateless fits microservice arch", subject: "auth-strategy", alternatives: ["sessions", "OAuth"])` — subject required
+- `cortex_note("intent", "user wants to refactor auth without breaking the API contract", subject: "auth-refactor")` — subject required
+- `cortex_note("blocker", "can't test auth without mocking the token service", subject: "auth-testing")` — subject required
+- `cortex_note("focus", "switching to CI pipeline fix", subject: "ci-fix")` — updates session focus
 
 ### Storage
 
 SQLite per project root (same pattern as Nexus).
 
 ```sql
-sessions      — {id, parent_session_id?, started_at, ended_at, focus, agent_type, status}
-events        — {id, session_id, timestamp, type, target, metadata_json}
-notes         — {id, session_id, timestamp, kind, subject, content, alternatives, status}
-state         — {id, session_id, layer, content, created_at}
-token_ledger  — {id, session_id, type, direction, tokens, timestamp}
+sessions      — {id (uuid), parent_session_id?, started_at, ended_at, focus, agent_type, status}
+events        — {id (uuid), session_id, timestamp, type, target, metadata_json}
+notes         — {id (uuid), session_id, timestamp, kind, subject, content, alternatives, status, conflict}
+state         — {id (uuid), session_id?, layer, content, created_at}
+token_ledger  — {id (uuid), session_id, type, direction, tokens, timestamp}
 ```
 
-- `sessions`: Each session has an optional `focus` label (e.g., "auth refactor", "fix CI") and optional `parent_session_id` for subagent sessions. `agent_type` distinguishes primary vs subagent.
+- `sessions`: Each session has a `focus` label and optional `parent_session_id` for subagent sessions. `agent_type` distinguishes primary vs subagent. See "Focus Assignment" below for how focus is set.
 - `events`: High-volume, low-value individually. `metadata_json` stores structured fields (line ranges, exit codes, categories). Pruned after consolidation.
-- `notes`: Low-volume, high-value. `status` field: `active` (default), `superseded` (replaced by a newer decision/intent on the same subject), or `resolved` (for blockers). Writing a new decision or intent auto-supersedes the previous active note with the same subject.
-- `state`: Consolidated snapshots — the actual "memory" served back.
+- `notes`: Low-volume, high-value. `subject` is **required** for `decision`, `intent`, and `blocker` kinds (the kinds that participate in auto-supersession); optional for `insight`. `status` field: `active` (default), `superseded` (replaced by a newer decision/intent on the same subject), or `resolved` (for blockers). Writing a new decision or intent auto-supersedes the previous active note with the same subject. Subject values are normalized (lowercased, trimmed) before matching.
+- `state`: Consolidated snapshots — the actual "memory" served back. `session_id` is nullable: session-level summaries reference a session; the project-level merged state (Level 3) has `session_id = NULL` and `layer = 'project'`.
 - `token_ledger`: Tracks tokens spent by Cortex vs estimated tokens saved (heuristic, not precise).
+
+### Focus Assignment
+
+Focus tracks what the AI is currently working on within a project. It determines which context the header and recall surface by default.
+
+**How focus is set:**
+1. **AI-set (primary):** The AI calls `cortex_note("intent", ...)` early in a session. The first intent note's subject becomes the session focus if none is set yet.
+2. **Explicit override:** `cortex_note("focus", "auth refactor")` — a dedicated note kind that updates the current session's focus directly. Useful when the AI recognizes a task shift mid-session.
+3. **Inherited:** Subagent sessions inherit the parent's focus unless overridden.
+4. **Fallback:** If no focus is set by the end of a session, consolidation infers one from the most-touched files and note subjects (rule-based, best-effort).
+
+**How focus affects retrieval:**
+- The header prioritizes the most recent session's focus. If the current session has no focus yet, it uses the previous session's focus.
+- `cortex_recall` biases results toward the current focus but does not exclude other topics. Off-focus results are ranked lower, not hidden.
+- A quick one-off session (no notes written, no focus set) does not displace the prior session's focus in the header. The header falls back to the last session that had a meaningful focus.
 
 ### Consolidation
 
@@ -96,10 +112,18 @@ Three levels, mirroring human memory:
 
 **Level 1 — Within a session (rule-based, zero token cost):**
 
-Pure algorithmic compression. Runs automatically when event count exceeds a threshold (~50 events). Requires structured event metadata (line ranges, exit codes, categories) captured by hooks.
+Pure algorithmic compression. Runs automatically when event count exceeds a threshold (~50 events). Compression quality depends on available metadata — it degrades gracefully when hook variables are missing.
+
+**Full metadata available:**
 - Dedup: 5 reads of auth.ts → `{file: "auth.ts", reads: 5, lines_touched: [1-50, 80-120]}`
 - Merge: sequential edits to the same file → single edit range (from `line_start`/`line_end` metadata)
 - Collapse: test(exit 1)→edit→test(exit 0) → `{file: "auth.ts", test_cycle: "fixed after 1 iteration"}` (from `exit_code` + `category` metadata)
+
+**Degraded mode (missing `$LINES`, `$EXIT_CODE`, etc.):**
+- Dedup still works: 5 reads of auth.ts → `{file: "auth.ts", reads: 5}` (no line ranges)
+- Merge still works: sequential edits → count only (no line ranges)
+- Collapse unavailable without exit codes — commands stored as individual events
+- The system logs which metadata fields are consistently missing so the user can diagnose hook configuration issues
 
 **Level 2 — Previous session summary (AI-assisted, one-time cost):**
 
@@ -117,11 +141,11 @@ The AI was going to spend those tokens understanding prior work anyway. Cortex j
 
 If the AI never calls `cortex_state` in a session (e.g., a quick one-off question), the unconsolidated data simply carries forward to the next session that does call it. Nothing is lost — it just waits.
 
-**Subagent session handling:** Subagents write to child sessions (linked via `parent_session_id`). During consolidation of the parent session, subagent notes marked as `active` are promoted into the parent state. Duplicate or conflicting notes are resolved by recency.
+**Subagent session handling:** Subagents write to child sessions (linked via `parent_session_id`). During consolidation of the parent session, subagent notes marked as `active` are promoted into the parent state. Exact duplicate notes (same kind + subject + content) are deduplicated. Conflicting notes (same kind + subject, different content) are **not** auto-resolved — both are kept as `active` with a `conflict: true` flag, and surfaced together in `cortex_state` so the AI can resolve them explicitly.
 
 **Level 3 — Cross-session (rule-based + selective AI):**
 
-When sessions accumulate (>5), older session summaries merge. Rule-based grouping by topic/files, with AI resolution only when ambiguous. The project-level state trends toward a ceiling of ~300-500 tokens, not infinity.
+When sessions accumulate (>5), older session summaries merge into a project-level state row (`state` table with `session_id = NULL`, `layer = 'project'`). Rule-based grouping by focus/topic/files, with AI resolution only when ambiguous. The project-level state trends toward a ceiling of ~300-500 tokens, not infinity. Only one project-level state row exists at a time — each Level 3 consolidation replaces the previous one.
 
 **Decay and freshness:**
 - Raw events: pruned after consolidation
@@ -170,20 +194,26 @@ Four tools, minimal surface to keep schema token cost low:
 | Tool | Purpose | Typical response |
 |---|---|---|
 | `cortex_state` | Full cognitive state, organized by topic | 300-500 tokens |
-| `cortex_note(kind, content, subject?, alternatives?)` | Record insight/decision/intent/blocker. New decisions/intents auto-supersede prior active notes with same subject. | Confirmation, ~10 tokens |
+| `cortex_note(kind, content, subject, alternatives?)` | Record insight/decision/intent/blocker/focus. `subject` required for decision, intent, blocker, focus; optional for insight. Normalized before matching. New decisions/intents auto-supersede prior active notes with same subject. | Confirmation, ~10 tokens |
 | `cortex_recall(topic)` | Search past context. Searches typed notes first (indexed by kind/subject/status), then consolidated state blobs. Excludes superseded items by default. | 100-200 tokens |
 | `cortex_brief(topic, for?)` | Scoped briefing for subagents | 50-80 tokens |
 
 ### CLI Commands
 
 ```
-cortex log <type> [--file <path>] [--summary <text>]  — Hook event capture
-cortex inject-header                                   — Startup hook: inject state header
-cortex status                                          — Health and connection check
-cortex stats                                           — Token savings dashboard
-cortex consolidate                                     — Manual consolidation trigger
-cortex serve                                           — Start MCP server
+cortex log read --file <path> [--lines <start>-<end>]    — Log file read event
+cortex log edit --file <path> [--lines <start>-<end>]    — Log file edit event
+cortex log write --file <path>                           — Log file write event
+cortex log cmd [--exit <code>] [--cmd <text>]            — Log command event (redacts before storage)
+cortex log agent --desc <text>                           — Log subagent spawn event
+cortex inject-header                                     — Startup hook: build and print state header
+cortex status                                            — Health and connection check
+cortex stats                                             — Token savings dashboard
+cortex consolidate                                       — Manual consolidation trigger
+cortex serve                                             — Start MCP server
 ```
+
+The `log` subcommands are the canonical ingestion interface. All flags are optional except where noted — missing metadata results in degraded-mode compression (see Level 1 consolidation). The `log cmd` handler derives `category` and `files_touched` internally from the command text, after redaction.
 
 ### Token Budget
 
@@ -250,7 +280,7 @@ Multiple writers can hit the database concurrently: hooks from tool calls, MCP s
 - `busy_timeout` set to 5000ms — hooks and queries wait rather than fail
 - Hook writes are minimal single-row INSERTs in implicit transactions — no locking contention
 - Consolidation uses short explicit transactions for batch operations
-- All hook writes are idempotent where possible (dedup on timestamp + target)
+- Each event gets a UUID primary key. No dedup at write time — dedup happens during Level 1 consolidation (by type + target + timestamp window), not at INSERT
 - Hook failures are non-blocking: if a hook can't write (locked DB, crash), the event is lost but the AI's workflow is unaffected. Working memory degrades gracefully, never blocks.
 
 ## Hook Configuration
