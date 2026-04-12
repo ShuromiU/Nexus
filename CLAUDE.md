@@ -4,7 +4,7 @@ Tree-sitter AST parser + SQLite index. Parses symbols, imports, exports, occurre
 
 ## Commands
 - `npm run build` — TypeScript compile (must pass before any work is done)
-- `npm run test` — Vitest suite (358 tests, ~2s)
+- `npm run test` — Vitest suite (~2s)
 - `npm run dev` — Watch mode compile
 - `npm run lint` — Type-check only (`tsc --noEmit`)
 
@@ -54,8 +54,6 @@ SQLite with WAL mode. Tables: `files`, `symbols`, `module_edges`, `occurrences`,
 
 Tests use in-memory SQLite (`:memory:`) with `createTestDb()` + `seedTestData()` helpers. Methods that read from disk (`grep()`, `source()`, `outline()` line count) need temp files with `root_path` meta pointing to the temp directory.
 
-Test files: `tests/query.test.ts`, `tests/mcp.test.ts`, `tests/cli.test.ts`, `tests/db.test.ts`, `tests/orchestrator.test.ts`, `tests/workspace.test.ts`, `tests/analysis.test.ts`, `tests/languages.test.ts`, `tests/e2e.test.ts`
-
 ## Conventions
 - Strict TypeScript, no `any`
 - POSIX paths internally (forward slashes), Windows paths normalized on input
@@ -67,9 +65,11 @@ Test files: `tests/query.test.ts`, `tests/mcp.test.ts`, `tests/cli.test.ts`, `te
 TypeScript/JavaScript (.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs), Python, Go, Rust, Java, C#, CSS
 
 ## MCP Tools
-`nexus_find`, `nexus_refs`, `nexus_search`, `nexus_grep`, `nexus_exports`, `nexus_imports`, `nexus_importers`, `nexus_symbols`, `nexus_tree`, `nexus_stats`, `nexus_reindex`, `nexus_outline`, `nexus_source`, `nexus_deps`
+`nexus_find`, `nexus_refs`, `nexus_search`, `nexus_grep`, `nexus_exports`, `nexus_imports`, `nexus_importers`, `nexus_symbols`, `nexus_tree`, `nexus_stats`, `nexus_reindex`, `nexus_outline`, `nexus_source`, `nexus_slice`, `nexus_deps`
 
 ### High-Token-Savings Tools
-- **`nexus_outline(file)`** — Structural summary: nested symbol tree with signatures + line ranges, import summary, export list. Replaces reading a file to understand its structure (~98% token savings).
+- **`nexus_outline(file)`** — Structural summary: nested symbol tree with signatures + line ranges, import summary, export list. Replaces reading a file to understand its structure (~98% token savings). `file` accepts a single path or an array of paths (via `outlineMany`).
 - **`nexus_source(name, file?)`** — Extract just one symbol's source code by name. Avoids reading the full file (~95% savings). Optional file filter for disambiguation.
+- **`nexus_slice(name, file?, limit?)`** — Returns a symbol's source plus the source of any named symbols it references in its body. Name-based approximation — good when you want a function and its direct dependencies in one call.
 - **`nexus_deps(file, direction?, depth?)`** — Transitive dependency tree in one call. `direction: 'imports'` (default) or `'importers'`. Depth 1-5 (default 2). Replaces chaining N import/importer calls.
+- **`nexus_search(query, limit?, kind?, path?)`** — Fuzzy symbol search; optional `path` prefix narrows results to a subtree of the repo.

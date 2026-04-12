@@ -557,6 +557,37 @@ export class NexusStore {
       .all(fileId) as (OccurrenceRow & { id: number })[];
   }
 
+  getOccurrencesInRange(
+    fileId: number,
+    startLine: number,
+    endLine: number,
+  ): (OccurrenceRow & { id: number })[] {
+    return this.db
+      .prepare(
+        `SELECT *
+         FROM occurrences
+         WHERE file_id = ?
+           AND line BETWEEN ? AND ?
+         ORDER BY line, col`,
+      )
+      .all(fileId, startLine, endLine) as (OccurrenceRow & { id: number })[];
+  }
+
+  findSymbolsByNames(names: string[]): SymbolWithFile[] {
+    if (names.length === 0) return [];
+
+    const placeholders = names.map(() => '?').join(',');
+    return this.db
+      .prepare(
+        `SELECT s.*, f.path AS file_path, f.language AS file_language
+         FROM symbols s
+         JOIN files f ON s.file_id = f.id
+         WHERE s.name IN (${placeholders})
+         ORDER BY s.name, f.path, s.line, s.col`,
+      )
+      .all(...names) as SymbolWithFile[];
+  }
+
   // ── Index Runs ──────────────────────────────────────────────────────
 
   insertIndexRun(run: IndexRunRow): number {

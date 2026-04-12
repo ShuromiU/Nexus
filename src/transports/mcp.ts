@@ -161,13 +161,14 @@ export function createMcpServer(): Server {
         },
         {
           name: 'nexus_search',
-          description: 'Fuzzy search across all symbol names. Returns matches ranked by relevance with score percentage.',
+          description: 'Fuzzy search across all symbol names. Returns matches ranked by relevance with score percentage. Optional path filtering narrows results to part of the repo.',
           inputSchema: {
             type: 'object' as const,
             properties: {
               query: { type: 'string', description: 'Search query (supports fuzzy matching)' },
               limit: { type: 'number', description: 'Max results (default: 20)' },
               kind: { type: 'string', description: 'Optional kind filter (function, class, interface, type, constant, enum, component, hook, method)' },
+              path: { type: 'string', description: 'Optional path prefix to narrow results (e.g. "src/components")' },
             },
             required: ['query'],
           },
@@ -200,11 +201,20 @@ export function createMcpServer(): Server {
         },
         {
           name: 'nexus_outline',
-          description: 'Structural outline of a file: all symbols organized by scope with signatures and line ranges. Replaces reading a full file to understand its structure. Returns imports, exports, and a nested symbol tree.',
+          description: 'Structural outline of one file or multiple files: all symbols organized by scope with signatures and line ranges. Replaces reading full files to understand structure.',
           inputSchema: {
             type: 'object' as const,
             properties: {
-              file: { type: 'string', description: 'File path (relative or absolute, supports partial/suffix match)' },
+              file: {
+                oneOf: [
+                  { type: 'string' as const, description: 'File path (relative or absolute, supports partial/suffix match)' },
+                  {
+                    type: 'array' as const,
+                    items: { type: 'string' as const },
+                    description: 'Array of file paths (relative or absolute, supports partial/suffix match)',
+                  },
+                ],
+              },
             },
             required: ['file'],
           },
@@ -217,6 +227,19 @@ export function createMcpServer(): Server {
             properties: {
               name: { type: 'string', description: 'Symbol name to extract source for' },
               file: { type: 'string', description: 'Optional file path to narrow results when the symbol exists in multiple files' },
+            },
+            required: ['name'],
+          },
+        },
+        {
+          name: 'nexus_slice',
+          description: 'Extract a symbol\'s source plus the source of the named symbols it references inside its body. Name-based approximation: useful when you want a function and its direct dependencies without reading several files.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol name to slice around' },
+              file: { type: 'string', description: 'Optional file path to narrow ambiguous symbols' },
+              limit: { type: 'number', description: 'Max referenced symbols to include (default: 20, max: 50)' },
             },
             required: ['name'],
           },
@@ -311,8 +334,10 @@ export function createMcpServer(): Server {
         }
 
         case 'nexus_search': {
-          const { query, limit, kind } = args as { query: string; limit?: number; kind?: string };
-          const result = qe.search(query, limit, kind);
+          const { query, limit, kind, path: pathPrefix } = args as {
+            query: string; limit?: number; kind?: string; path?: string;
+          };
+          const result = qe.search(query, limit, kind, pathPrefix);
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         }
 
@@ -331,14 +356,22 @@ export function createMcpServer(): Server {
         }
 
         case 'nexus_outline': {
-          const { file } = args as { file: string };
-          const result = qe.outline(file);
+          const { file } = args as { file: string | string[] };
+          const result = Array.isArray(file) ? qe.outlineMany(file) : qe.outline(file);
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         }
 
         case 'nexus_source': {
           const { name: symbolName, file } = args as { name: string; file?: string };
           const result = qe.source(symbolName, file);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        }
+
+        case 'nexus_slice': {
+          const { name: symbolName, file, limit } = args as {
+            name: string; file?: string; limit?: number;
+          };
+          const result = qe.slice(symbolName, { file, limit });
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         }
 

@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { applySchema, initializeMeta } from '../src/db/schema.js';
 import { NexusStore } from '../src/db/store.js';
 import { QueryEngine } from '../src/query/engine.js';
@@ -76,12 +79,16 @@ describe('MCP server', () => {
       'nexus_imports',
       'nexus_tree',
       'nexus_search',
+      'nexus_outline',
+      'nexus_source',
+      'nexus_slice',
+      'nexus_deps',
       'nexus_stats',
     ];
     // createMcpServer registers all handlers; if it completes, all 7 are registered
     const server = createMcpServer();
     expect(server).toBeDefined();
-    expect(expectedTools).toHaveLength(7);
+    expect(expectedTools).toHaveLength(11);
   });
 });
 
@@ -161,6 +168,21 @@ describe('MCP response shapes', () => {
     expect(json.results[0]).toHaveProperty('_score');
   });
 
+  it('nexus_search supports path filtering', () => {
+    const result = engine.search('format', 20, undefined, 'src');
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.query).toContain('--path src');
+  });
+
+  it('nexus_outline batch response returns an outlines map', () => {
+    const result = engine.outlineMany(['src/utils.ts', 'missing.ts']);
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.type).toBe('outline');
+    expect(json.results[0]).toHaveProperty('outlines');
+    expect(json.results[0].outlines).toHaveProperty('src/utils.ts');
+    expect(json.results[0]).toHaveProperty('missing');
+  });
+
   it('nexus_stats response has IndexStats shape', () => {
     const result = engine.stats();
     const json = JSON.parse(JSON.stringify(result));
@@ -176,6 +198,65 @@ describe('MCP response shapes', () => {
     expect(stats).toHaveProperty('extractor_version');
   });
 
+  it('nexus_slice response has root and references', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-mcp-slice-'));
+    const srcDir = path.join(tmpDir, 'src');
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, 'utils.ts'), [
+      'export function helper(): string {',
+      "  return 'ok';",
+      '}',
+      '',
+      'export function formatDate(): string {',
+      '  return helper();',
+      '}',
+    ].join('\n'));
+
+    const sliceDb = createTestDb();
+    const sliceStore = new NexusStore(sliceDb);
+    sliceStore.setMeta('root_path', tmpDir);
+
+    const fileId = sliceStore.insertFile({
+      path: 'src/utils.ts',
+      path_key: 'src/utils.ts',
+      hash: 'slice123',
+      mtime: 1,
+      size: 100,
+      language: 'typescript',
+      status: 'indexed',
+      indexed_at: '2026-04-07T12:00:00Z',
+    });
+    sliceStore.insertSymbols([
+      { file_id: fileId, name: 'helper', kind: 'function', line: 1, col: 0, end_line: 3 },
+      { file_id: fileId, name: 'formatDate', kind: 'function', line: 5, col: 0, end_line: 7 },
+    ]);
+    sliceStore.insertOccurrences([
+      { file_id: fileId, name: 'helper', line: 6, col: 9, context: 'return helper();', confidence: 'heuristic' },
+    ]);
+    sliceStore.insertIndexRun({
+      started_at: '2026-04-07T12:00:00Z',
+      completed_at: '2026-04-07T12:00:01Z',
+      mode: 'full',
+      files_scanned: 1,
+      files_indexed: 1,
+      files_skipped: 0,
+      files_errored: 0,
+      status: 'completed',
+    });
+
+    const sliceEngine = new QueryEngine(sliceDb);
+    try {
+      const result = sliceEngine.slice('formatDate');
+      const json = JSON.parse(JSON.stringify(result));
+      expect(json.type).toBe('slice');
+      expect(json.results[0]).toHaveProperty('root');
+      expect(json.results[0]).toHaveProperty('references');
+    } finally {
+      sliceDb.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('all responses serialize cleanly to JSON', () => {
     const queries = [
       () => engine.find('formatDate'),
@@ -184,6 +265,8 @@ describe('MCP response shapes', () => {
       () => engine.imports('src/utils.ts'),
       () => engine.tree(),
       () => engine.search('format'),
+      () => engine.outlineMany(['src/utils.ts']),
+      () => engine.slice('formatDate'),
       () => engine.stats(),
     ];
 

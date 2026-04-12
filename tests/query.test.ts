@@ -7,6 +7,7 @@ import { applySchema, initializeMeta, SCHEMA_VERSION, EXTRACTOR_VERSION } from '
 import { NexusStore } from '../src/db/store.js';
 import { QueryEngine } from '../src/query/engine.js';
 import { fuzzyScore, rankResults } from '../src/query/ranking.js';
+import { runIndex } from '../src/index/orchestrator.js';
 
 // Side-effect: register TS adapter so stats() can pull capabilities
 import '../src/analysis/languages/typescript.js';
@@ -531,6 +532,18 @@ describe('QueryEngine', () => {
       expect(result.count).toBeLessThanOrEqual(2);
     });
 
+    it('filters by path prefix before scoring', () => {
+      const result = engine.search('formatDate', 20, undefined, 'src/components');
+      expect(result.count).toBe(0);
+      expect(result.query).toBe('search formatDate --path src/components');
+    });
+
+    it('keeps matches inside the requested path prefix', () => {
+      const result = engine.search('Button', 20, undefined, 'src/components');
+      expect(result.count).toBeGreaterThanOrEqual(1);
+      expect(result.results.every(r => r.file.startsWith('src/components'))).toBe(true);
+    });
+
     it('returns empty for no matches', () => {
       const result = engine.search('zzzzzzxyz');
       expect(result.count).toBe(0);
@@ -666,6 +679,23 @@ describe('QueryEngine', () => {
       const o = engine.outline('src/utils.ts').results[0];
       expect(o.lines).toBe(0);
     });
+
+    it('returns multiple outlines keyed by resolved path', () => {
+      const result = engine.outlineMany(['utils.ts', 'src/components/Button.tsx']);
+      expect(result.type).toBe('outline');
+      expect(result.count).toBe(2);
+      expect(Object.keys(result.results[0].outlines)).toEqual([
+        'src/components/Button.tsx',
+        'src/utils.ts',
+      ]);
+    });
+
+    it('dedupes repeated files and reports missing ones', () => {
+      const result = engine.outlineMany(['src/utils.ts', 'utils.ts', 'missing.ts']);
+      expect(result.count).toBe(1);
+      expect(Object.keys(result.results[0].outlines)).toEqual(['src/utils.ts']);
+      expect(result.results[0].missing).toEqual(['missing.ts']);
+    });
   });
 
   // ── source ─────────────────────────────────────────────────────────
@@ -788,6 +818,108 @@ describe('QueryEngine', () => {
     it('query string includes file when provided', () => {
       const result = srcEngine.source('formatDate', 'utils.ts');
       expect(result.query).toBe('source formatDate --file utils.ts');
+    });
+  });
+
+  describe('slice', () => {
+    let tmpDir: string;
+    let sliceDb: Database.Database;
+    let sliceEngine: QueryEngine;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-slice-'));
+      fs.mkdirSync(path.join(tmpDir, '.git'));
+      fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+
+      fs.writeFileSync(path.join(tmpDir, 'src', 'helpers.ts'), [
+        'export function helperA(): string {',
+        "  return 'a';",
+        '}',
+        '',
+        'export function helperB(): string {',
+        '  return helperA();',
+        '}',
+      ].join('\n'));
+
+      fs.writeFileSync(path.join(tmpDir, 'src', 'other.ts'), [
+        'export function helperA(): string {',
+        "  return 'other';",
+        '}',
+        '',
+        'export function runTask(): string {',
+        '  return helperA();',
+        '}',
+      ].join('\n'));
+
+      fs.writeFileSync(path.join(tmpDir, 'src', 'service.ts'), [
+        "import { helperA, helperB } from './helpers.ts';",
+        '',
+        'export function runTask(input: string): string {',
+        '  const data = helperA();',
+        '  return helperB() + input + data;',
+        '}',
+        '',
+        'export function idleTask(): string {',
+        "  return 'idle';",
+        '}',
+      ].join('\n'));
+
+      fs.writeFileSync(path.join(tmpDir, 'src', 'fanout.ts'), [
+        'function one(): string { return "1"; }',
+        'function two(): string { return "2"; }',
+        'function three(): string { return "3"; }',
+        '',
+        'export function fanOut(): string {',
+        '  return one() + two() + three();',
+        '}',
+      ].join('\n'));
+
+      const result = runIndex(tmpDir);
+      expect(result.filesErrored).toBe(0);
+
+      const dbPath = path.join(tmpDir, '.nexus', 'index.db');
+      sliceDb = new Database(dbPath);
+      sliceDb.pragma('journal_mode = WAL');
+      sliceDb.pragma('foreign_keys = ON');
+      sliceEngine = new QueryEngine(sliceDb);
+    });
+
+    afterEach(() => {
+      sliceDb.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('returns the root symbol and referenced symbols', () => {
+      const result = sliceEngine.slice('runTask', { file: 'service.ts' });
+      expect(result.type).toBe('slice');
+      expect(result.count).toBe(1);
+      expect(result.results[0].root.file).toBe('src/service.ts');
+      expect(result.results[0].references.map(r => r.name)).toEqual(['helperA', 'helperB']);
+    });
+
+    it('prefers imported files when a referenced name is ambiguous', () => {
+      const result = sliceEngine.slice('runTask', { file: 'service.ts' });
+      const helperA = result.results[0].references.find(r => r.name === 'helperA');
+      expect(helperA?.file).toBe('src/helpers.ts');
+    });
+
+    it('returns an empty reference list when the body has no matched symbols', () => {
+      const result = sliceEngine.slice('idleTask', { file: 'service.ts' });
+      expect(result.count).toBe(1);
+      expect(result.results[0].references).toEqual([]);
+    });
+
+    it('includes disambiguation when multiple root symbols match', () => {
+      const result = sliceEngine.slice('runTask');
+      expect(result.count).toBe(1);
+      expect(result.results[0].disambiguation?.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('caps the number of referenced symbols and marks truncation', () => {
+      const result = sliceEngine.slice('fanOut', { limit: 2 });
+      expect(result.count).toBe(1);
+      expect(result.results[0].references).toHaveLength(2);
+      expect(result.results[0].truncated).toBe(true);
     });
   });
 

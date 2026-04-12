@@ -1,6 +1,23 @@
 import { describe, it, expect } from 'vitest';
-import { createProgram, formatSymbols, formatOccurrences, formatEdges, formatTree, formatStats } from '../src/transports/cli.js';
-import type { SymbolResult, OccurrenceResult, ModuleEdgeResult, TreeEntry, IndexStats } from '../src/query/engine.js';
+import {
+  createProgram,
+  formatSymbols,
+  formatOccurrences,
+  formatEdges,
+  formatTree,
+  formatStats,
+  formatBatchOutline,
+  formatSlice,
+} from '../src/transports/cli.js';
+import type {
+  SymbolResult,
+  OccurrenceResult,
+  ModuleEdgeResult,
+  TreeEntry,
+  IndexStats,
+  BatchOutlineResult,
+  SliceResult,
+} from '../src/query/engine.js';
 
 // ── CLI Argument Parsing ──────────────────────────────────────────────
 
@@ -16,6 +33,10 @@ describe('CLI argument parsing', () => {
     expect(commandNames).toContain('imports');
     expect(commandNames).toContain('tree');
     expect(commandNames).toContain('search');
+    expect(commandNames).toContain('outline');
+    expect(commandNames).toContain('source');
+    expect(commandNames).toContain('slice');
+    expect(commandNames).toContain('deps');
     expect(commandNames).toContain('stats');
     expect(commandNames).toContain('repair');
     expect(commandNames).toContain('serve');
@@ -33,6 +54,13 @@ describe('CLI argument parsing', () => {
     const searchCmd = program.commands.find(c => c.name() === 'search')!;
     const limitOpt = searchCmd.options.find(o => o.long === '--limit');
     expect(limitOpt).toBeDefined();
+  });
+
+  it('search command accepts --path option', () => {
+    const program = createProgram();
+    const searchCmd = program.commands.find(c => c.name() === 'search')!;
+    const pathOpt = searchCmd.options.find(o => o.long === '--path');
+    expect(pathOpt).toBeDefined();
   });
 
   it('has correct name and version', () => {
@@ -300,5 +328,79 @@ describe('formatStats', () => {
 
     const output = formatStats(stats);
     expect(output).toContain('never');
+  });
+});
+
+describe('formatBatchOutline', () => {
+  it('formats multiple outlines and missing files', () => {
+    const batch: BatchOutlineResult = {
+      outlines: {
+        'src/a.ts': {
+          file: 'src/a.ts',
+          language: 'typescript',
+          lines: 10,
+          imports: [],
+          exports: ['foo'],
+          outline: [],
+        },
+        'src/b.ts': {
+          file: 'src/b.ts',
+          language: 'typescript',
+          lines: 20,
+          imports: [],
+          exports: [],
+          outline: [],
+        },
+      },
+      missing: ['src/missing.ts'],
+    };
+
+    const output = formatBatchOutline(batch);
+    expect(output).toContain('-- src/a.ts --');
+    expect(output).toContain('-- src/b.ts --');
+    expect(output).toContain('Missing:');
+    expect(output).toContain('src/missing.ts');
+  });
+});
+
+describe('formatSlice', () => {
+  it('formats root, references, disambiguation, and truncation', () => {
+    const slice: SliceResult = {
+      root: {
+        name: 'runIndex',
+        kind: 'function',
+        file: 'src/index/orchestrator.ts',
+        line: 10,
+        end_line: 20,
+        language: 'typescript',
+        source: 'function runIndex() {}',
+      },
+      references: [{
+        name: 'extractAndBuffer',
+        kind: 'function',
+        file: 'src/index/orchestrator.ts',
+        line: 30,
+        end_line: 40,
+        language: 'typescript',
+        source: 'function extractAndBuffer() {}',
+      }],
+      disambiguation: [{
+        name: 'runIndex',
+        kind: 'function',
+        file: 'src/other.ts',
+        line: 5,
+        col: 0,
+        language: 'typescript',
+      }],
+      truncated: true,
+    };
+
+    const output = formatSlice(slice);
+    expect(output).toContain('-- root: runIndex');
+    expect(output).toContain('References:');
+    expect(output).toContain('extractAndBuffer');
+    expect(output).toContain('Other matches:');
+    expect(output).toContain('src/other.ts:5:0');
+    expect(output).toContain('Output truncated.');
   });
 });

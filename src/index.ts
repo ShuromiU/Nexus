@@ -38,7 +38,7 @@ export { QueryEngine } from './query/engine.js';
 export type {
   NexusResult, SymbolResult, OccurrenceResult,
   ModuleEdgeResult, ImporterResult, GrepResult, TreeEntry, IndexStats,
-  OutlineEntry, OutlineResult, SourceResult, DepNode, DepsResult,
+  OutlineEntry, OutlineResult, BatchOutlineResult, SourceResult, SliceResult, DepNode, DepsResult,
 } from './query/engine.js';
 export { fuzzyScore, rankResults } from './query/ranking.js';
 export type { FuzzyMatch } from './query/ranking.js';
@@ -46,7 +46,7 @@ export type { FuzzyMatch } from './query/ranking.js';
 // CLI (formatters only — program creation is in transports/cli.ts)
 export {
   formatSymbols, formatOccurrences, formatEdges, formatTree, formatGrepResults, formatStats,
-  formatOutline, formatSource, formatDeps,
+  formatOutline, formatBatchOutline, formatSource, formatSlice, formatDeps,
 } from './transports/cli.js';
 
 // MCP server

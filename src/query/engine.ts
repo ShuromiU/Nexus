@@ -11,7 +11,7 @@ import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './rank
 
 export interface NexusResult<T> {
   query: string;
-  type: 'find' | 'occurrences' | 'exports' | 'imports' | 'tree' | 'search' | 'stats' | 'grep' | 'outline' | 'source' | 'deps';
+  type: 'find' | 'occurrences' | 'exports' | 'imports' | 'tree' | 'search' | 'stats' | 'grep' | 'outline' | 'source' | 'deps' | 'slice';
   results: T[];
   count: number;
   suggestions?: string[];
@@ -125,6 +125,11 @@ export interface OutlineResult {
   outline: OutlineEntry[];
 }
 
+export interface BatchOutlineResult {
+  outlines: Record<string, OutlineResult>;
+  missing?: string[];
+}
+
 export interface SourceResult {
   name: string;
   kind: string;
@@ -135,6 +140,13 @@ export interface SourceResult {
   source: string;
   signature?: string;
   doc?: string;
+}
+
+export interface SliceResult {
+  root: SourceResult;
+  references: SourceResult[];
+  disambiguation?: SymbolResult[];
+  truncated?: boolean;
 }
 
 export interface DepNode {
@@ -353,11 +365,17 @@ export class QueryEngine {
    * Multi-word queries tokenize and match each token across all fields.
    * Returns "did you mean?" suggestions when no results are found.
    */
-  search(query: string, limit = 20, kind?: string): NexusResult<SymbolResult & { _score: number }> {
+  search(
+    query: string,
+    limit = 20,
+    kind?: string,
+    pathPrefix?: string,
+  ): NexusResult<SymbolResult & { _score: number }> {
     const start = performance.now();
     const trimmed = query.trim();
     const isMultiWord = trimmed.includes(' ');
     const tokens = isMultiWord ? trimmed.split(/\s+/).filter(t => t.length > 0) : [trimmed];
+    const normalizedPathPrefix = pathPrefix ? normalizePath(pathPrefix).toLowerCase() : null;
 
     // Get symbols — filter by kind in SQL when possible
     const allSymbols = kind
@@ -375,6 +393,12 @@ export class QueryEngine {
     for (const row of allSymbols) {
       const file = fileMap.get(row.file_id);
       if (!file) continue;
+      if (
+        normalizedPathPrefix &&
+        !normalizePath(file.path).toLowerCase().startsWith(normalizedPathPrefix)
+      ) {
+        continue;
+      }
 
       // Extract searchable path basename: "KanbanBoard" from "components/KanbanBoard.tsx"
       const pathSegments = file.path.split(/[\\/]/);
@@ -431,7 +455,12 @@ export class QueryEngine {
 
     const ranked = rankResults(scored).slice(0, limit);
 
-    const result = this.wrap('search', `search ${query}`, ranked, start);
+    const result = this.wrap(
+      'search',
+      `search ${query}${kind ? ` --kind ${kind}` : ''}${pathPrefix ? ` --path ${pathPrefix}` : ''}`,
+      ranked,
+      start,
+    );
 
     // Generate suggestions when no results found
     if (ranked.length === 0) {
@@ -640,6 +669,49 @@ export class QueryEngine {
   }
 
   /**
+   * Structural outline for multiple files in one call.
+   */
+  outlineMany(files: string[]): NexusResult<BatchOutlineResult> {
+    const start = performance.now();
+    const resolved = new Map<string, OutlineResult>();
+    const missing = new Set<string>();
+
+    for (const input of files) {
+      const result = this.outline(input);
+      if (result.results.length === 0) {
+        missing.add(input);
+        continue;
+      }
+
+      const outline = result.results[0];
+      if (!resolved.has(outline.file)) {
+        resolved.set(outline.file, outline);
+      }
+    }
+
+    const outlines: Record<string, OutlineResult> = {};
+    for (const filePath of [...resolved.keys()].sort((a, b) => a.localeCompare(b))) {
+      outlines[filePath] = resolved.get(filePath)!;
+    }
+
+    const missingList = [...missing].sort((a, b) => a.localeCompare(b));
+    const { status, health } = this.getIndexState();
+
+    return {
+      query: `outline ${files.join(' ')}`,
+      type: 'outline',
+      results: [{
+        outlines,
+        ...(missingList.length > 0 ? { missing: missingList } : {}),
+      }],
+      count: Object.keys(outlines).length,
+      index_status: status,
+      index_health: health,
+      timing_ms: Math.round((performance.now() - start) * 100) / 100,
+    };
+  }
+
+  /**
    * Extract source code for a specific symbol. Returns just the lines where
    * the symbol is defined, avoiding full file reads.
    */
@@ -717,6 +789,120 @@ export class QueryEngine {
     results.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 
     return this.wrap('source', `source ${name}${filePath ? ` --file ${filePath}` : ''}`, results, start);
+  }
+
+  /**
+   * Extract a symbol and the named symbols it references inside its body.
+   * This is a name-based approximation designed to save file reads.
+   */
+  slice(name: string, opts?: { file?: string; limit?: number }): NexusResult<SliceResult> {
+    const start = performance.now();
+    let joined = this.store.getSymbolsWithFile(name);
+    if (joined.length === 0) {
+      joined = this.store.getSymbolsWithFileCaseInsensitive(name);
+    }
+
+    if (opts?.file && joined.length > 0) {
+      const normalized = normalizePath(opts.file);
+      joined = joined.filter(s =>
+        normalizePath(s.file_path).endsWith(normalized) ||
+        normalizePath(s.file_path).toLowerCase().endsWith(normalized.toLowerCase()),
+      );
+    }
+
+    if (joined.length === 0) {
+      return this.wrap('slice', buildSliceQuery(name, opts), [], start);
+    }
+
+    joined.sort(
+      (a, b) => a.file_path.localeCompare(b.file_path) || a.line - b.line || a.col - b.col,
+    );
+
+    const root = joined[0];
+    const rootSource = this.getSourceForSymbol(root);
+    if (!rootSource) {
+      return this.wrap('slice', buildSliceQuery(name, opts), [], start);
+    }
+
+    const occurrences = this.store.getOccurrencesInRange(
+      root.file_id,
+      rootSource.line,
+      rootSource.end_line,
+    );
+    const referencedNames: string[] = [];
+    const seenNames = new Set<string>();
+
+    for (const occ of occurrences) {
+      if (occ.name === root.name || occ.name.length <= 1 || seenNames.has(occ.name)) {
+        continue;
+      }
+      seenNames.add(occ.name);
+      referencedNames.push(occ.name);
+    }
+
+    const importedFileIds = new Set(
+      this.store
+        .getImportsByFileId(root.file_id)
+        .map(edge => edge.resolved_file_id)
+        .filter((id): id is number => id != null),
+    );
+    const matchesByName = new Map<string, SymbolWithFile[]>();
+    for (const symbol of this.store.findSymbolsByNames(referencedNames)) {
+      if (symbol.id === root.id) continue;
+      if (
+        symbol.file_id === root.file_id &&
+        symbol.line >= rootSource.line &&
+        symbol.line <= rootSource.end_line
+      ) {
+        continue;
+      }
+      const matches = matchesByName.get(symbol.name) ?? [];
+      matches.push(symbol);
+      matchesByName.set(symbol.name, matches);
+    }
+
+    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 50);
+    const references: SourceResult[] = [];
+    const selectedIds = new Set<number>();
+    let truncated = false;
+
+    for (const refName of referencedNames) {
+      if (references.length >= limit) {
+        truncated = true;
+        break;
+      }
+
+      const candidates = (matchesByName.get(refName) ?? [])
+        .slice()
+        .sort((a, b) => {
+          const aScore = getSlicePreferenceScore(a, root.file_id, importedFileIds);
+          const bScore = getSlicePreferenceScore(b, root.file_id, importedFileIds);
+          return (
+            aScore - bScore ||
+            a.file_path.localeCompare(b.file_path) ||
+            a.line - b.line ||
+            a.col - b.col
+          );
+        });
+
+      const best = candidates.find(candidate => !selectedIds.has(candidate.id));
+      if (!best) continue;
+
+      const reference = this.getSourceForSymbol(best);
+      if (!reference) continue;
+
+      references.push(reference);
+      selectedIds.add(best.id);
+    }
+
+    return this.wrap('slice', buildSliceQuery(name, opts), [{
+      root: rootSource,
+      references,
+      ...(joined.length > 1 && !opts?.file
+        ? { disambiguation: joined.slice(1).map(symbolWithFileToResult) }
+        : {}),
+      ...(truncated ? { truncated: true } : {}),
+    }], start);
   }
 
   /**
@@ -846,6 +1032,48 @@ export class QueryEngine {
   }
 
   /**
+   * Read a symbol's source from disk, using the next symbol as an end-line
+   * fallback when the extractor did not record one.
+   */
+  private getSourceForSymbol(symbol: SymbolWithFile): SourceResult | null {
+    const root = this.store.getMeta('root_path') ?? '';
+    let lines: string[];
+    try {
+      const content = fs.readFileSync(path.resolve(root, symbol.file_path), 'utf-8');
+      lines = content.split('\n');
+    } catch {
+      return null;
+    }
+
+    const allFileSymbols = this.store.getSymbolsByFileId(symbol.file_id);
+    allFileSymbols.sort((a, b) => a.line - b.line || a.col - b.col);
+
+    const startLine = symbol.line;
+    let endLine = symbol.end_line;
+
+    if (endLine == null) {
+      const idx = allFileSymbols.findIndex(s => s.id === symbol.id);
+      if (idx >= 0 && idx < allFileSymbols.length - 1) {
+        endLine = allFileSymbols[idx + 1].line - 1;
+      } else {
+        endLine = Math.min(startLine + 49, lines.length);
+      }
+    }
+
+    return {
+      name: symbol.name,
+      kind: symbol.kind,
+      file: symbol.file_path,
+      line: startLine,
+      end_line: endLine,
+      language: symbol.file_language,
+      source: lines.slice(startLine - 1, endLine).join('\n'),
+      ...(symbol.signature ? { signature: symbol.signature } : {}),
+      ...(symbol.doc ? { doc: symbol.doc } : {}),
+    };
+  }
+
+  /**
    * Wrap results in the NexusResult envelope.
    */
   private wrap<T>(
@@ -899,4 +1127,21 @@ function edgeToResult(edge: ModuleEdgeRow & { id: number }): ModuleEdgeResult {
 
 function normalizePath(p: string): string {
   return p.replace(/\\/g, '/');
+}
+
+function buildSliceQuery(
+  name: string,
+  opts?: { file?: string; limit?: number },
+): string {
+  return `slice ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.limit ? ` --limit ${opts.limit}` : ''}`;
+}
+
+function getSlicePreferenceScore(
+  symbol: SymbolWithFile,
+  rootFileId: number,
+  importedFileIds: Set<number>,
+): number {
+  if (symbol.file_id === rootFileId) return 0;
+  if (importedFileIds.has(symbol.file_id)) return 1;
+  return 2;
 }

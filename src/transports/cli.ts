@@ -11,7 +11,7 @@ import { detectRoot, detectCaseSensitivity } from '../workspace/detector.js';
 import type {
   SymbolResult, OccurrenceResult, ModuleEdgeResult,
   TreeEntry, IndexStats, NexusResult, ImporterResult, GrepResult,
-  OutlineResult, SourceResult, DepsResult,
+  OutlineResult, BatchOutlineResult, SourceResult, SliceResult, DepsResult,
 } from '../query/engine.js';
 
 // Side-effect: register all language adapters
@@ -188,6 +188,34 @@ function formatOutline(result: OutlineResult): string {
   return lines.join('\n');
 }
 
+function formatBatchOutline(result: BatchOutlineResult): string {
+  const lines: string[] = [];
+  const entries = Object.entries(result.outlines);
+
+  if (entries.length === 0) {
+    lines.push('No matching files found.');
+  } else {
+    for (let i = 0; i < entries.length; i++) {
+      const outline = entries[i][1];
+      lines.push(`  -- ${outline.file} --`);
+      lines.push(formatOutline(outline));
+      if (i < entries.length - 1) {
+        lines.push('');
+      }
+    }
+  }
+
+  if (result.missing && result.missing.length > 0) {
+    lines.push('');
+    lines.push('  Missing:');
+    for (const file of result.missing) {
+      lines.push(`    ${file}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 function formatSource(results: SourceResult[]): string {
   if (results.length === 0) return 'No matching symbols found.';
 
@@ -204,6 +232,48 @@ function formatSource(results: SourceResult[]): string {
     }
     lines.push('');
   }
+  return lines.join('\n');
+}
+
+function formatSlice(result: SliceResult): string {
+  const lines: string[] = [];
+  lines.push(`  -- root: ${result.root.name}  ${result.root.file}:${result.root.line}-${result.root.end_line} --`);
+  lines.push('');
+  for (const srcLine of result.root.source.split('\n')) {
+    lines.push(`  ${srcLine}`);
+  }
+
+  if (result.references.length > 0) {
+    lines.push('');
+    lines.push('  References:');
+    for (const ref of result.references) {
+      lines.push(`  -- ${ref.name}  ${ref.file}:${ref.line}-${ref.end_line} --`);
+      for (const srcLine of ref.source.split('\n')) {
+        lines.push(`  ${srcLine}`);
+      }
+      lines.push('');
+    }
+    if (lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+  } else {
+    lines.push('');
+    lines.push('  No referenced symbols found.');
+  }
+
+  if (result.disambiguation && result.disambiguation.length > 0) {
+    lines.push('');
+    lines.push('  Other matches:');
+    for (const alt of result.disambiguation) {
+      lines.push(`    ${alt.kind} ${alt.name}  ${alt.file}:${alt.line}:${alt.col}`);
+    }
+  }
+
+  if (result.truncated) {
+    lines.push('');
+    lines.push('  Output truncated.');
+  }
+
   return lines.join('\n');
 }
 
@@ -398,12 +468,13 @@ export function createProgram(): Command {
     .command('search <query>')
     .description('Fuzzy search across symbol names')
     .option('-l, --limit <n>', 'Max results', '20')
-    .action((query: string, opts: { limit: string }) => {
+    .option('-p, --path <prefix>', 'Path prefix filter')
+    .action((query: string, opts: { limit: string; path?: string }) => {
       const { db } = openQueryDb(process.cwd());
       try {
         const engine = new QueryEngine(db);
         const limit = parseInt(opts.limit, 10) || 20;
-        const result = engine.search(query, limit);
+        const result = engine.search(query, limit, undefined, opts.path);
         // Format search results like find, but with score
         const lines: string[] = [];
         if (result.results.length === 0) {
@@ -452,17 +523,22 @@ export function createProgram(): Command {
   // ── outline ───────────────────────────────────────────────────────
 
   program
-    .command('outline <file>')
+    .command('outline <files...>')
     .description('Structural outline of a file — symbols, imports, exports')
-    .action((file: string) => {
+    .action((files: string[]) => {
       const { db } = openQueryDb(process.cwd());
       try {
         const engine = new QueryEngine(db);
-        const result = engine.outline(file);
-        if (result.results.length > 0) {
-          printEnvelope(result, formatOutline(result.results[0]));
+        if (files.length === 1) {
+          const result = engine.outline(files[0]);
+          if (result.results.length > 0) {
+            printEnvelope(result, formatOutline(result.results[0]));
+          } else {
+            printEnvelope(result, 'File not found.');
+          }
         } else {
-          printEnvelope(result, 'File not found.');
+          const result = engine.outlineMany(files);
+          printEnvelope(result, formatBatchOutline(result.results[0]));
         }
       } finally {
         db.close();
@@ -481,6 +557,27 @@ export function createProgram(): Command {
         const engine = new QueryEngine(db);
         const result = engine.source(name, opts.file);
         printEnvelope(result, formatSource(result.results));
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('slice <name>')
+    .description('Extract a symbol and the named symbols it references')
+    .option('-f, --file <file>', 'Narrow to a specific file')
+    .option('-l, --limit <n>', 'Max referenced symbols', '20')
+    .action((name: string, opts: { file?: string; limit: string }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const limit = parseInt(opts.limit, 10) || 20;
+        const result = engine.slice(name, { file: opts.file, limit });
+        if (result.results.length > 0) {
+          printEnvelope(result, formatSlice(result.results[0]));
+        } else {
+          printEnvelope(result, 'No matching symbols found.');
+        }
       } finally {
         db.close();
       }
@@ -575,7 +672,9 @@ export {
   formatGrepResults,
   formatStats,
   formatOutline,
+  formatBatchOutline,
   formatSource,
+  formatSlice,
   formatDeps,
 };
 
