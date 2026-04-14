@@ -184,6 +184,46 @@ When Grep is still appropriate: raw string literals, CSS values, regex
 patterns, or content in non-code files (markdown, JSON, config).
 ```
 
+## Codex Setup
+
+Codex can use Nexus as a global MCP server and can be taught the same "Nexus first" habit through `AGENTS.md`.
+
+### Global MCP
+
+Add Nexus to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.nexus]
+command = "C:\\Program Files\\nodejs\\node.exe"
+args = ["C:\\Claude Code\\Nexus\\dist\\transports\\cli.js", "serve"]
+```
+
+### Global Instructions
+
+Create `~/.codex/AGENTS.md` with guidance like:
+
+```markdown
+- Use Nexus MCP tools (`nexus_outline`, `nexus_source`, `nexus_slice`, `nexus_deps`, `nexus_find`, `nexus_refs`, `nexus_search`) before `rg`, `grep`, or full-file reads for code lookup.
+- Use `rg` only for raw literals, config files, markdown, or content Nexus does not index well.
+```
+
+If you want Codex to load existing Claude-style repo docs automatically, add this to `~/.codex/config.toml` too:
+
+```toml
+project_doc_fallback_filenames = ["CLAUDE.md", ".claude.local.md"]
+project_doc_max_bytes = 65536
+```
+
+### Current Codex Limitation
+
+Current Codex docs say `PreToolUse` and `PostToolUse` only emit `Bash`, and Codex hooks are currently disabled on Windows. That means Claude's hook-based "block Grep, force Nexus" behavior does not have exact native parity in Codex on Windows yet. The reliable Codex path today is:
+
+- register Nexus as a global MCP server
+- mark the server `required = true` and give it a longer startup timeout in `~/.codex/config.toml`
+- on Windows, launch Codex through a small wrapper that runs `nexus build` before starting Codex
+- load Codex instructions from `AGENTS.md`
+- keep repo-level `AGENTS.md` or `CLAUDE.md` guidance concise and explicit
+
 ## Supported Languages
 
 | Language | Extensions | Symbols | Imports/Exports | References | Docstrings | Signatures |
