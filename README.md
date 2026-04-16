@@ -22,8 +22,18 @@ nexus_refs("activeProjectId") → 102 occurrences across 15 files, instantly
 
 ## Install
 
+Nexus is distributed three ways. Pick whichever fits your workflow:
+
 ```bash
+# A. From npm (once published)
 npm install -g nexus-index
+
+# B. Direct from GitHub (no npm publish needed)
+npm install -g github:ShuromiU/Nexus
+
+# C. From a local clone (when developing Nexus itself)
+git clone https://github.com/ShuromiU/Nexus.git
+cd Nexus && npm install && npm run build && npm install -g .
 ```
 
 > **Requires Node.js 18+** and native build tools (tree-sitter uses C bindings):
@@ -36,6 +46,18 @@ Verify it works:
 ```bash
 nexus --version
 ```
+
+### Updating Nexus across machines
+
+When you change Nexus and want every project on every machine to pick up the new tools:
+
+| Distribution | Update flow |
+|--------------|-------------|
+| **npm publish** | Bump `version` in `package.json`, run `npm publish`, then on each machine `npm i -g nexus-index@latest`. |
+| **GitHub install** | `git push` from the dev machine, then on each consuming machine `npm i -g github:ShuromiU/Nexus` again — npm re-fetches `HEAD`. |
+| **Local clone** | `git pull && npm run build && npm install -g .` on each machine. |
+
+Already-running MCP servers won't pick up the new code until they restart — quit and reopen Claude Code (or run `nexus reindex` via MCP if you only need a fresh index, not new tool definitions).
 
 ## Quick Start
 
@@ -125,24 +147,17 @@ Otherwise, incremental builds handle the rest.
 
 ## Claude Code Setup
 
-### Global (all projects)
+A full Nexus setup has three layers:
 
-Add to `~/.claude/settings.json`:
+1. **MCP server** — exposes the tools to Claude Code
+2. **PreToolUse hook** — denies Grep/Explore on code, forcing Nexus
+3. **SessionStart hook** — keeps the index fresh on session start (optional)
 
-```json
-{
-  "mcpServers": {
-    "nexus": {
-      "command": "nexus",
-      "args": ["serve"]
-    }
-  }
-}
-```
+You can ship just (1) and Claude will *be able* to use Nexus. You need (2) to make it *actually use* Nexus instead of falling back to Grep.
 
-### Per-project
+### 1. MCP server registration
 
-Add to `.mcp.json` in your project root:
+**Global** — `~/.claude/settings.json`:
 
 ```json
 {
@@ -155,33 +170,150 @@ Add to `.mcp.json` in your project root:
 }
 ```
 
-The MCP server indexes your project on startup, then exposes these tools:
+**Per-project** — `.mcp.json` in the project root (overrides global):
 
+```json
+{
+  "mcpServers": {
+    "nexus": {
+      "command": "nexus",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+The MCP server runs `nexus build` on startup and re-checks freshness every 30 seconds.
+
+### 2. PreToolUse hook — force Nexus before Grep
+
+The repo ships a canonical hook at `hooks/nexus-first.sh` that:
+- denies `Grep` on code files (markdown/json/config still allowed)
+- denies `Explore` subagents whose prompt doesn't reference any `nexus_*` tool
+- denies generic `Agent` spawns whose description and prompt don't reference Nexus
+
+**Install:**
+
+```bash
+# 1. Copy the hook (and make it executable)
+mkdir -p ~/.claude/hooks
+cp hooks/nexus-first.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/nexus-first.sh
+
+# 2. Make sure jq is on PATH (the hook uses jq to parse stdin)
+#    macOS:   brew install jq
+#    Linux:   sudo apt install jq
+#    Windows: choco install jq   (or scoop install jq)
+```
+
+**Wire it up** in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Glob|Agent",
+        "hooks": [
+          { "type": "command",
+            "command": "bash -c 'source ~/.bashrc && bash ~/.claude/hooks/nexus-first.sh'" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Disable temporarily:** `NEXUS_FIRST_DISABLED=1` in your shell.
+
+When you add a new Nexus tool, update the `NEXUS_TOOLS_REGEX` constant inside `nexus-first.sh` — otherwise the hook will block agents that mention only the new tool name.
+
+### 3. SessionStart hook — auto-build on session start (optional)
+
+The MCP server already reindexes on startup, but if you want the project's index ready before the first MCP call, ship the included `hooks/session-start-build.sh`:
+
+```bash
+cp hooks/session-start-build.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/session-start-build.sh
+```
+
+In `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command",
+            "command": "bash ~/.claude/hooks/session-start-build.sh" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The script reads `$CLAUDE_PROJECT_DIR` (set by Claude Code) and falls back to `$PWD`.
+
+### MCP tools
+
+Every tool accepts an optional `compact: true` flag that returns a minimal-key envelope (~50% smaller payload).
+
+#### Discovery
 | Tool | What it does | Example |
-|------|-------------|---------|
+|------|--------------|---------|
 | `nexus_find` | Find where a symbol is defined | `nexus_find("useState")` |
-| `nexus_refs` | Find all occurrences of an identifier | `nexus_refs("activeProjectId")` → 102 hits |
-| `nexus_search` | Fuzzy search across names, paths, docs | `nexus_search("drag drop kanban")` |
-| `nexus_exports` | List what a file exports | `nexus_exports("src/utils.ts")` |
-| `nexus_imports` | List what a file imports | `nexus_imports("src/App.tsx")` |
-| `nexus_importers` | Find all files importing from a module | `nexus_importers("react")` |
-| `nexus_symbols` | List all symbols in a file | `nexus_symbols("src/App.tsx")` |
+| `nexus_refs` | Find all occurrences of an identifier | `nexus_refs("activeProjectId")` |
+| `nexus_search` | Fuzzy search across names + paths | `nexus_search("drag drop kanban")` |
+| `nexus_grep` | Regex over indexed file contents | `nexus_grep("TODO|FIXME")` |
+| `nexus_exports` | What a file exports | `nexus_exports("src/utils.ts")` |
+| `nexus_imports` | What a file imports | `nexus_imports("src/App.tsx")` |
+| `nexus_importers` | Inverse: who imports this module | `nexus_importers("react")` |
+| `nexus_symbols` | All symbols in a file | `nexus_symbols("src/App.tsx")` |
 | `nexus_tree` | Directory listing with symbol counts | `nexus_tree("src/components")` |
-| `nexus_stats` | Index health and language stats | `nexus_stats()` |
+| `nexus_stats` | Index health + per-language stats | `nexus_stats()` |
+| `nexus_reindex` | Trigger an incremental reindex | `nexus_reindex()` |
+
+#### High-savings — collapse multi-call workflows
+| Tool | What it does | Replaces |
+|------|--------------|----------|
+| `nexus_outline(file)` | Nested symbol tree + imports + exports for a file (or array of files) | Reading a file just to see its structure (~98% savings) |
+| `nexus_source(name, file?)` | Just one symbol's source lines | Reading the whole file for one function |
+| `nexus_slice(name, file?, limit?)` | A symbol + the source of symbols it references | "Find function then read each helper it calls" |
+| `nexus_deps(file, direction?, depth?)` | Transitive import or importer tree | N chained `imports`/`importers` calls |
+
+#### New token-savers
+| Tool | What it does | Use case |
+|------|--------------|----------|
+| `nexus_callers(name, file?, depth?)` | Inverse of `slice`: who calls this, with snippets | "What breaks if I change X?" |
+| `nexus_pack(query, budget_tokens?)` | Token-budget-aware bundle (outlines + sources up to N tokens) | "Give me just enough context to answer X within 4K tokens" |
+| `nexus_changed(ref?)` | Files changed since `ref` (default `HEAD~1`) + their outlines | PR review without reading the diff |
+| `nexus_diff_outline(ref_a, ref_b?)` | Semantic diff: added/removed/modified symbols between refs | Code review in one call |
+| `nexus_signatures(names[])` | Batch signature + doc summary, no body | "Tell me the shape of these 10 functions" |
+| `nexus_definition_at(file, line, col?)` | LSP-style go-to-definition | Click-to-definition while reading code |
+| `nexus_unused_exports(path?)` | Exports with no importers and no external occurrences | Dead-code finder during refactor |
+| `nexus_kind_index(kind, path?)` | Every symbol of one kind in a subtree | "Show me every React component in src/ui" |
+| `nexus_doc(name)` | Just the docstring(s) | Avoid reading source bodies for the comment block |
+| `nexus_batch(calls[])` | Multiple sub-tool calls in one MCP roundtrip | Saves protocol overhead for known sequences |
 
 ### Teaching your assistant to use Nexus
 
-Add this to your project's `CLAUDE.md` (or equivalent):
+Add to your project's `CLAUDE.md`:
 
 ```markdown
 ## Nexus — Codebase Index (MCP)
 
-Use Nexus MCP tools (`nexus_search`, `nexus_find`, `nexus_refs`) BEFORE
-Grep or Glob for code symbol lookups. Nexus is faster and returns structured
-results with file paths, line numbers, and context.
+Always prefer Nexus MCP tools over Grep/Glob/Read for code lookups.
+Start with `nexus_outline` for structure, `nexus_search`/`nexus_find` for
+discovery, `nexus_slice`/`nexus_callers`/`nexus_deps` for relationships,
+and `nexus_source`/`nexus_pack` for actual code.
 
-When Grep is still appropriate: raw string literals, CSS values, regex
-patterns, or content in non-code files (markdown, JSON, config).
+Pass `compact: true` to halve the payload.
+
+Use Grep only for raw string literals, CSS values, comments, or content in
+non-code files (markdown, JSON, config).
 ```
 
 ## Codex Setup
@@ -265,23 +397,68 @@ Optional `.nexus.json` in your project root:
 ## CLI Reference
 
 ```
-nexus build              Build or update the index (incremental)
-nexus rebuild            Force a full index rebuild
-nexus find <name>        Find where a symbol is defined
-  -k, --kind <kind>      Filter by kind (function, class, type, hook, etc.)
-nexus refs <name>        Find all occurrences of an identifier
-nexus search <query>     Fuzzy search across symbols
-  -l, --limit <n>        Max results (default: 20)
-nexus exports <file>     List what a file exports
-nexus imports <file>     List what a file imports
-nexus importers <source> Find all files importing from a source module
-nexus symbols <file>     List all symbols in a file
-  -k, --kind <kind>      Filter by kind
-nexus tree [path]        List files under a path with export summaries
-nexus stats              Show index summary and health
-nexus repair             Check integrity, rebuild if corrupt
-nexus serve              Start MCP server (stdio transport)
+# Index lifecycle
+nexus build                         Incremental update of the index
+nexus rebuild                       Force a full reparse of every file
+nexus repair                        Integrity check, rebuild if corrupt
+nexus serve                         Start MCP server (stdio transport)
+
+# Discovery
+nexus find <name>                   Find where a symbol is defined
+  -k, --kind <kind>                   Filter by kind (function, class, hook, …)
+nexus refs <name>                   All occurrences of an identifier
+nexus search <query>                Fuzzy search across symbol names
+  -l, --limit <n>                     Max results (default 20)
+  -p, --path <prefix>                 Path prefix filter
+nexus grep <pattern>                Regex over indexed file contents
+  -p, --path <prefix>                 Path prefix filter
+  --lang <language>                   Language filter
+  -l, --limit <n>                     Max results (default 50)
+nexus exports <file>                List what a file exports
+nexus imports <file>                List what a file imports
+nexus importers <source>            Files importing from a source module
+nexus symbols <file>                All symbols in a file
+  -k, --kind <kind>                   Filter by kind
+nexus tree [path]                   Files under a path + export summaries
+nexus stats                         Index summary and health
+
+# High-savings
+nexus outline <files...>            Structural outline (one or many files)
+nexus source <name>                 Just one symbol's source code
+  -f, --file <file>                   Disambiguate
+nexus slice <name>                  Symbol + the named symbols it references
+  -f, --file <file>                   Disambiguate
+  -l, --limit <n>                     Max referenced symbols (default 20)
+nexus deps <file>                   Transitive imports/importers tree
+  -d, --direction <dir>               imports | importers (default imports)
+  --depth <n>                         Max depth 1-5 (default 2)
+
+# New token-savers
+nexus callers <name>                Functions/classes that call this symbol
+  -f, --file <file>                   Disambiguate
+  -d, --depth <n>                     Recursion depth 1-3 (default 1)
+  -l, --limit <n>                     Max callers per level (default 30)
+nexus pack <query>                  Token-budget context bundle
+  -b, --budget <n>                    Token budget (default 4000)
+  -p, --paths <a,b,c>                 Comma-separated path prefixes
+nexus changed                       Files changed since a git ref + outlines
+  -r, --ref <ref>                     Compare against (default HEAD~1)
+nexus diff-outline <refA> [refB]    Semantic diff between two refs
+nexus signatures <names...>         Batch signature lookup, no body
+  -f, --file <file>                   Optional file scope
+  -k, --kind <kind>                   Optional kind filter
+nexus definition-at <file> <line> [col]   LSP-style go-to-definition
+nexus unused-exports                Dead-code finder
+  -p, --path <prefix>                 Path prefix to scope
+  -l, --limit <n>                     Max results (default 100)
+nexus kind-index <kind>             All symbols of a kind under a path
+  -p, --path <prefix>                 Path prefix
+  -l, --limit <n>                     Max results (default 200)
+nexus doc <name>                    Just the docstring(s)
+  -f, --file <file>                   Disambiguate
 ```
+
+All new commands accept `--pretty` for indented JSON output.
 
 ## Architecture
 

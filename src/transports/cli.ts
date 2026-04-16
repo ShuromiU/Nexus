@@ -648,6 +648,175 @@ export function createProgram(): Command {
       }
     });
 
+  // ── New token-saver commands ──────────────────────────────────────
+  // These output JSON (use --pretty for indented). MCP-first tools — the
+  // CLI is provided for scripting and quick local debugging.
+
+  const printJson = (value: unknown, pretty: boolean): void => {
+    console.log(pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value));
+  };
+
+  program
+    .command('callers <name>')
+    .description('Find functions/classes that call this symbol (inverse of slice)')
+    .option('-f, --file <file>', 'Disambiguate when name is multi-defined')
+    .option('-d, --depth <n>', 'Recursion depth, 1-3', '1')
+    .option('-l, --limit <n>', 'Max callers per level', '30')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((name: string, opts: { file?: string; depth: string; limit: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.callers(name, {
+          file: opts.file,
+          depth: parseInt(opts.depth, 10) || 1,
+          limit: parseInt(opts.limit, 10) || 30,
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('pack <query>')
+    .description('Token-budget-aware context bundle (outlines + sources up to budget)')
+    .option('-b, --budget <n>', 'Token budget', '4000')
+    .option('-p, --paths <paths>', 'Comma-separated path prefixes')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((query: string, opts: { budget: string; paths?: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.pack(query, {
+          budget_tokens: parseInt(opts.budget, 10) || 4000,
+          paths: opts.paths ? opts.paths.split(',').map(s => s.trim()) : undefined,
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('changed')
+    .description('Files changed since a git ref with current outlines')
+    .option('-r, --ref <ref>', 'Git ref to compare against', 'HEAD~1')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((opts: { ref: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.changed({ ref: opts.ref });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('diff-outline <refA> [refB]')
+    .description('Semantic diff of symbols between two git refs')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((refA: string, refB: string | undefined, opts: { pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.diffOutline(refA, refB);
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('signatures <names...>')
+    .description('Batch signature lookup (no body) for multiple symbol names')
+    .option('-f, --file <file>', 'Optional file scope')
+    .option('-k, --kind <kind>', 'Optional kind filter')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((names: string[], opts: { file?: string; kind?: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.signatures(names, { file: opts.file, kind: opts.kind });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('definition-at <file> <line> [col]')
+    .description('Resolve identifier at file:line[:col] to its definition source')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((file: string, line: string, col: string | undefined, opts: { pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.definitionAt(file, parseInt(line, 10), col ? parseInt(col, 10) : undefined);
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('unused-exports')
+    .description('Find exports with no importers and no external occurrences')
+    .option('-p, --path <prefix>', 'Path prefix to scope (e.g. "src/")')
+    .option('-l, --limit <n>', 'Max results', '100')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((opts: { path?: string; limit: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.unusedExports({
+          path: opts.path,
+          limit: parseInt(opts.limit, 10) || 100,
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('kind-index <kind>')
+    .description('List all symbols of a given kind, optionally under a path prefix')
+    .option('-p, --path <prefix>', 'Path prefix')
+    .option('-l, --limit <n>', 'Max results', '200')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((kind: string, opts: { path?: string; limit: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.kindIndex(kind, {
+          path: opts.path,
+          limit: parseInt(opts.limit, 10) || 200,
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('doc <name>')
+    .description('Just the docstring(s) for a symbol — no body')
+    .option('-f, --file <file>', 'Optional file scope')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((name: string, opts: { file?: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.doc(name, { file: opts.file });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
   // ── serve ──────────────────────────────────────────────────────────
 
   program

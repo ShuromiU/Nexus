@@ -10,6 +10,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { openDatabase, applySchema } from '../db/schema.js';
 import { QueryEngine } from '../query/engine.js';
+import type { NexusResult } from '../query/engine.js';
+import { compactify } from '../query/compact.js';
 import { runIndex } from '../index/orchestrator.js';
 import { detectRoot } from '../workspace/detector.js';
 import type Database from 'better-sqlite3';
@@ -82,6 +84,20 @@ function initializeIndex(startDir: string): void {
 
 // ── MCP Server ────────────────────────────────────────────────────────
 
+/** Reusable schema fragment: every tool accepts an optional `compact` flag. */
+const COMPACT_PROP = {
+  compact: {
+    type: 'boolean' as const,
+    description: 'When true, return a minimal-key envelope (~50% smaller payload).',
+  },
+};
+
+/** Build the standard MCP text response, applying compactify when requested. */
+function respond<T>(result: NexusResult<T>, compact?: boolean): { content: { type: 'text'; text: string }[] } {
+  const payload = compact ? compactify(result) : result;
+  return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+}
+
 export function createMcpServer(): Server {
   const server = new Server(
     { name: 'nexus', version: '0.1.0' },
@@ -101,6 +117,7 @@ export function createMcpServer(): Server {
             properties: {
               name: { type: 'string', description: 'Symbol name to find' },
               kind: { type: 'string', description: 'Optional kind filter (function, class, interface, type, constant, enum, component, hook, method)' },
+              ...COMPACT_PROP,
             },
             required: ['name'],
           },
@@ -112,6 +129,7 @@ export function createMcpServer(): Server {
             type: 'object' as const,
             properties: {
               name: { type: 'string', description: 'Identifier name to search for' },
+              ...COMPACT_PROP,
             },
             required: ['name'],
           },
@@ -123,6 +141,7 @@ export function createMcpServer(): Server {
             type: 'object' as const,
             properties: {
               file: { type: 'string', description: 'File path (relative or absolute, supports partial/suffix match)' },
+              ...COMPACT_PROP,
             },
             required: ['file'],
           },
@@ -134,6 +153,7 @@ export function createMcpServer(): Server {
             type: 'object' as const,
             properties: {
               file: { type: 'string', description: 'File path (relative or absolute, supports partial/suffix match)' },
+              ...COMPACT_PROP,
             },
             required: ['file'],
           },
@@ -145,6 +165,7 @@ export function createMcpServer(): Server {
             type: 'object' as const,
             properties: {
               source: { type: 'string', description: 'Module source to search for (e.g. "@dnd-kit/core", "react", "./utils")' },
+              ...COMPACT_PROP,
             },
             required: ['source'],
           },
@@ -156,6 +177,7 @@ export function createMcpServer(): Server {
             type: 'object' as const,
             properties: {
               path: { type: 'string', description: 'Optional path prefix to filter (e.g. "src/components")' },
+              ...COMPACT_PROP,
             },
           },
         },
@@ -169,6 +191,7 @@ export function createMcpServer(): Server {
               limit: { type: 'number', description: 'Max results (default: 20)' },
               kind: { type: 'string', description: 'Optional kind filter (function, class, interface, type, constant, enum, component, hook, method)' },
               path: { type: 'string', description: 'Optional path prefix to narrow results (e.g. "src/components")' },
+              ...COMPACT_PROP,
             },
             required: ['query'],
           },
@@ -181,6 +204,7 @@ export function createMcpServer(): Server {
             properties: {
               file: { type: 'string', description: 'File path (relative or absolute, supports partial/suffix match)' },
               kind: { type: 'string', description: 'Optional kind filter (function, class, interface, type, constant, enum, component, hook, method, variable)' },
+              ...COMPACT_PROP,
             },
             required: ['file'],
           },
@@ -195,6 +219,7 @@ export function createMcpServer(): Server {
               path: { type: 'string', description: 'Optional path prefix to narrow search (e.g. "src/components")' },
               language: { type: 'string', description: 'Optional language filter (typescript, python, go, rust, java, csharp, css)' },
               limit: { type: 'number', description: 'Max results (default: 50)' },
+              ...COMPACT_PROP,
             },
             required: ['pattern'],
           },
@@ -215,6 +240,7 @@ export function createMcpServer(): Server {
                   },
                 ],
               },
+              ...COMPACT_PROP,
             },
             required: ['file'],
           },
@@ -227,6 +253,7 @@ export function createMcpServer(): Server {
             properties: {
               name: { type: 'string', description: 'Symbol name to extract source for' },
               file: { type: 'string', description: 'Optional file path to narrow results when the symbol exists in multiple files' },
+              ...COMPACT_PROP,
             },
             required: ['name'],
           },
@@ -240,6 +267,7 @@ export function createMcpServer(): Server {
               name: { type: 'string', description: 'Symbol name to slice around' },
               file: { type: 'string', description: 'Optional file path to narrow ambiguous symbols' },
               limit: { type: 'number', description: 'Max referenced symbols to include (default: 20, max: 50)' },
+              ...COMPACT_PROP,
             },
             required: ['name'],
           },
@@ -253,6 +281,7 @@ export function createMcpServer(): Server {
               file: { type: 'string', description: 'File path (relative or absolute, supports partial/suffix match)' },
               direction: { type: 'string', enum: ['imports', 'importers'], description: 'Direction: "imports" (default) follows what the file imports; "importers" follows what imports the file' },
               depth: { type: 'number', description: 'Max traversal depth (default: 2, max: 5)' },
+              ...COMPACT_PROP,
             },
             required: ['file'],
           },
@@ -262,7 +291,7 @@ export function createMcpServer(): Server {
           description: 'Full index summary: file counts, symbol totals, per-language capabilities, index status and health.',
           inputSchema: {
             type: 'object' as const,
-            properties: {},
+            properties: { ...COMPACT_PROP },
           },
         },
         {
@@ -273,14 +302,239 @@ export function createMcpServer(): Server {
             properties: {},
           },
         },
+
+        // ── New token-saver tools ─────────────────────────────────────
+
+        {
+          name: 'nexus_callers',
+          description: 'Find every function/class that calls a symbol — the inverse of nexus_slice. Groups by caller with one snippet per call site. Optional depth recurses upward through the call graph (heuristic precision, occurrence-based).',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol name to find callers of' },
+              file: { type: 'string', description: 'Optional file path to disambiguate when the name has multiple defs' },
+              depth: { type: 'number', description: 'Recursion depth, 1-3 (default 1)' },
+              limit: { type: 'number', description: 'Max callers per level (default 30, max 100)' },
+              ...COMPACT_PROP,
+            },
+            required: ['name'],
+          },
+        },
+        {
+          name: 'nexus_pack',
+          description: 'Token-budget-aware context bundler. Given a query and a token budget, assembles outlines + selected sources up to the budget. Replaces guessing what files to feed in for an LLM question.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              query: { type: 'string', description: 'Search query that drives ranking' },
+              budget_tokens: { type: 'number', description: 'Token budget (default 4000, min 200, max 50000)' },
+              paths: { type: 'array', items: { type: 'string' }, description: 'Optional path prefixes to scope ranking' },
+              ...COMPACT_PROP,
+            },
+            required: ['query'],
+          },
+        },
+        {
+          name: 'nexus_changed',
+          description: 'Files changed since a git ref (default HEAD~1) with their current outlines. Falls back to mtime-since-last-index when git is unavailable. Replaces reading full diffs for PR/branch review.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              ref: { type: 'string', description: 'Git ref to compare against (default "HEAD~1")' },
+              ...COMPACT_PROP,
+            },
+          },
+        },
+        {
+          name: 'nexus_diff_outline',
+          description: 'Semantic diff: which symbols were added, removed, or modified between two git refs. Re-parses historical content via git show — does not require updating the index.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              ref_a: { type: 'string', description: 'Base git ref' },
+              ref_b: { type: 'string', description: 'Target git ref (default "HEAD")' },
+              ...COMPACT_PROP,
+            },
+            required: ['ref_a'],
+          },
+        },
+        {
+          name: 'nexus_signatures',
+          description: 'Batch signature lookup: name + signature + doc summary for each input name, no body. Use when comparing siblings or auditing an interface — replaces N nexus_find/nexus_source calls.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              names: { type: 'array', items: { type: 'string' }, description: 'Symbol names to look up' },
+              file: { type: 'string', description: 'Optional file path to scope results' },
+              kind: { type: 'string', description: 'Optional kind filter' },
+              ...COMPACT_PROP,
+            },
+            required: ['names'],
+          },
+        },
+        {
+          name: 'nexus_definition_at',
+          description: 'LSP-style go-to-definition. Resolves the identifier at (file, line, col?) to its definition source. Best-effort heuristic.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              file: { type: 'string', description: 'File path' },
+              line: { type: 'number', description: 'Line number (1-based)' },
+              col: { type: 'number', description: 'Optional column (1-based). When omitted, picks the first identifier on the line.' },
+              ...COMPACT_PROP,
+            },
+            required: ['file', 'line'],
+          },
+        },
+        {
+          name: 'nexus_unused_exports',
+          description: 'Find exports with no importers and no external occurrences — best-effort dead-code finder. Note: re-exports through index.ts may appear unused; filter by path to scope.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              path: { type: 'string', description: 'Optional path prefix to scope (e.g. "src/")' },
+              limit: { type: 'number', description: 'Max results (default 100, max 500)' },
+              ...COMPACT_PROP,
+            },
+          },
+        },
+        {
+          name: 'nexus_kind_index',
+          description: 'List every symbol of a given kind (interface, class, component, hook, etc.) under an optional path prefix. Replaces grep/search chains for "show me every <kind> in this folder".',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              kind: { type: 'string', description: 'Symbol kind (function, class, interface, type, component, hook, method, …)' },
+              path: { type: 'string', description: 'Optional path prefix' },
+              limit: { type: 'number', description: 'Max results (default 200, max 1000)' },
+              ...COMPACT_PROP,
+            },
+            required: ['kind'],
+          },
+        },
+        {
+          name: 'nexus_doc',
+          description: 'Just the docstring(s) for a symbol — no body, no source. Tiny but hot path: avoids reading source bodies when you only need the comment block.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol name' },
+              file: { type: 'string', description: 'Optional file path to disambiguate' },
+              ...COMPACT_PROP,
+            },
+            required: ['name'],
+          },
+        },
+        {
+          name: 'nexus_batch',
+          description: 'Run several Nexus tools in a single MCP roundtrip. Saves protocol/envelope overhead when you already know you need N related queries.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              calls: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    tool: { type: 'string', description: 'Tool name (e.g. "nexus_find")' },
+                    args: { type: 'object', description: 'Arguments for the tool' },
+                  },
+                  required: ['tool'],
+                },
+                description: 'Array of {tool, args} pairs to execute',
+              },
+              ...COMPACT_PROP,
+            },
+            required: ['calls'],
+          },
+        },
       ],
     };
   });
 
   // ── Call Tool ───────────────────────────────────────────────────────
 
+  /**
+   * Dispatch a single tool call to its engine method. Returns the verbose
+   * NexusResult — the caller decides whether to compactify. Used by both the
+   * top-level CallToolRequest handler and the nexus_batch sub-dispatcher.
+   */
+  function dispatch(toolName: string, args: Record<string, unknown>): NexusResult<unknown> {
+    const qe = getEngine();
+    switch (toolName) {
+      case 'nexus_find':
+        return qe.find(args.name as string, args.kind as string | undefined);
+      case 'nexus_refs':
+        return qe.occurrences(args.name as string);
+      case 'nexus_exports':
+        return qe.exports(args.file as string);
+      case 'nexus_imports':
+        return qe.imports(args.file as string);
+      case 'nexus_importers':
+        return qe.importers(args.source as string);
+      case 'nexus_tree':
+        return qe.tree(args.path as string | undefined);
+      case 'nexus_search':
+        return qe.search(args.query as string, args.limit as number | undefined, args.kind as string | undefined, args.path as string | undefined);
+      case 'nexus_symbols':
+        return qe.symbols(args.file as string, args.kind as string | undefined);
+      case 'nexus_grep':
+        return qe.grep(args.pattern as string, args.path as string | undefined, args.language as string | undefined, args.limit as number | undefined);
+      case 'nexus_outline': {
+        const f = args.file as string | string[];
+        return Array.isArray(f) ? qe.outlineMany(f) : qe.outline(f);
+      }
+      case 'nexus_source':
+        return qe.source(args.name as string, args.file as string | undefined);
+      case 'nexus_slice':
+        return qe.slice(args.name as string, { file: args.file as string | undefined, limit: args.limit as number | undefined });
+      case 'nexus_deps':
+        return qe.deps(args.file as string, args.direction as 'imports' | 'importers' | undefined, args.depth as number | undefined);
+      case 'nexus_stats':
+        return qe.stats();
+      case 'nexus_callers':
+        return qe.callers(args.name as string, {
+          file: args.file as string | undefined,
+          depth: args.depth as number | undefined,
+          limit: args.limit as number | undefined,
+        });
+      case 'nexus_pack':
+        return qe.pack(args.query as string, {
+          budget_tokens: args.budget_tokens as number | undefined,
+          paths: args.paths as string[] | undefined,
+        });
+      case 'nexus_changed':
+        return qe.changed({ ref: args.ref as string | undefined });
+      case 'nexus_diff_outline':
+        return qe.diffOutline(args.ref_a as string, args.ref_b as string | undefined);
+      case 'nexus_signatures':
+        return qe.signatures(args.names as string[], {
+          file: args.file as string | undefined,
+          kind: args.kind as string | undefined,
+        });
+      case 'nexus_definition_at':
+        return qe.definitionAt(args.file as string, args.line as number, args.col as number | undefined);
+      case 'nexus_unused_exports':
+        return qe.unusedExports({
+          path: args.path as string | undefined,
+          limit: args.limit as number | undefined,
+        });
+      case 'nexus_kind_index':
+        return qe.kindIndex(args.kind as string, {
+          path: args.path as string | undefined,
+          limit: args.limit as number | undefined,
+        });
+      case 'nexus_doc':
+        return qe.doc(args.name as string, { file: args.file as string | undefined });
+      default:
+        throw new Error(`Unknown tool: ${toolName}`);
+    }
+  }
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
+    const { name, arguments: rawArgs } = request.params;
+    const args = (rawArgs ?? {}) as Record<string, unknown>;
+    const compact = args.compact === true;
 
     try {
       // nexus_reindex is handled before freshness check (it IS the freshness mechanism)
@@ -294,101 +548,35 @@ export function createMcpServer(): Server {
       // Auto-refresh if stale (>30s since last check)
       ensureFresh();
 
-      const qe = getEngine();
-
-      switch (name) {
-        case 'nexus_find': {
-          const { name: symbolName, kind } = args as { name: string; kind?: string };
-          const result = qe.find(symbolName, kind);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_refs': {
-          const { name: identName } = args as { name: string };
-          const result = qe.occurrences(identName);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_exports': {
-          const { file } = args as { file: string };
-          const result = qe.exports(file);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_imports': {
-          const { file } = args as { file: string };
-          const result = qe.imports(file);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_importers': {
-          const { source } = args as { source: string };
-          const result = qe.importers(source);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_tree': {
-          const { path: pathPrefix } = (args ?? {}) as { path?: string };
-          const result = qe.tree(pathPrefix);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_search': {
-          const { query, limit, kind, path: pathPrefix } = args as {
-            query: string; limit?: number; kind?: string; path?: string;
-          };
-          const result = qe.search(query, limit, kind, pathPrefix);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_symbols': {
-          const { file, kind } = args as { file: string; kind?: string };
-          const result = qe.symbols(file, kind);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_grep': {
-          const { pattern, path: pathPrefix, language, limit } = args as {
-            pattern: string; path?: string; language?: string; limit?: number;
-          };
-          const result = qe.grep(pattern, pathPrefix, language, limit);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_outline': {
-          const { file } = args as { file: string | string[] };
-          const result = Array.isArray(file) ? qe.outlineMany(file) : qe.outline(file);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_source': {
-          const { name: symbolName, file } = args as { name: string; file?: string };
-          const result = qe.source(symbolName, file);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_slice': {
-          const { name: symbolName, file, limit } = args as {
-            name: string; file?: string; limit?: number;
-          };
-          const result = qe.slice(symbolName, { file, limit });
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_deps': {
-          const { file, direction, depth } = args as { file: string; direction?: 'imports' | 'importers'; depth?: number };
-          const result = qe.deps(file, direction, depth);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        case 'nexus_stats': {
-          const result = qe.stats();
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        }
-
-        default:
-          throw new Error(`Unknown tool: ${name}`);
+      // nexus_batch: run multiple sub-tools in one roundtrip
+      if (name === 'nexus_batch') {
+        const calls = (args.calls ?? []) as { tool: string; args?: Record<string, unknown> }[];
+        const subResults = calls.map(call => {
+          try {
+            const subArgs = (call.args ?? {}) as Record<string, unknown>;
+            const subCompact = compact || subArgs.compact === true;
+            const sub = dispatch(call.tool, subArgs);
+            return {
+              tool: call.tool,
+              ok: true as const,
+              result: subCompact ? compactify(sub) : sub,
+            };
+          } catch (err) {
+            return {
+              tool: call.tool,
+              ok: false as const,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        });
+        const payload = compact
+          ? { ty: 'batch', r: subResults }
+          : { type: 'batch', results: subResults, count: subResults.length };
+        return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
       }
+
+      const result = dispatch(name, args);
+      return respond(result, compact);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       return { content: [{ type: 'text', text: `Error: ${errorMessage}` }], isError: true };

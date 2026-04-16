@@ -1,17 +1,43 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import { NexusStore } from '../db/store.js';
 import type { SymbolRow, FileRow, ModuleEdgeRow, SymbolWithFile, OccurrenceWithFile, ImportEdgeWithFile } from '../db/store.js';
 import { getAllAdapters } from '../analysis/languages/registry.js';
+import { extractSource } from '../analysis/extractor.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
 
 // ── Result Types ──────────────────────────────────────────────────────
 
+export type NexusResultType =
+  | 'find'
+  | 'occurrences'
+  | 'exports'
+  | 'imports'
+  | 'tree'
+  | 'search'
+  | 'stats'
+  | 'grep'
+  | 'outline'
+  | 'source'
+  | 'deps'
+  | 'slice'
+  | 'callers'
+  | 'pack'
+  | 'changed'
+  | 'diff_outline'
+  | 'signatures'
+  | 'definition_at'
+  | 'unused_exports'
+  | 'kind_index'
+  | 'doc'
+  | 'batch';
+
 export interface NexusResult<T> {
   query: string;
-  type: 'find' | 'occurrences' | 'exports' | 'imports' | 'tree' | 'search' | 'stats' | 'grep' | 'outline' | 'source' | 'deps' | 'slice';
+  type: NexusResultType;
   results: T[];
   count: number;
   suggestions?: string[];
@@ -161,6 +187,111 @@ export interface DepsResult {
   direction: 'imports' | 'importers';
   depth: number;
   tree: DepNode;
+}
+
+// ── New tool result types ─────────────────────────────────────────────
+
+export interface CallerCallSite {
+  line: number;
+  col: number;
+  context: string;
+}
+
+export interface CallerResult {
+  caller: SymbolResult;
+  call_sites: CallerCallSite[];
+  callers?: CallerResult[]; // populated when depth > 1
+}
+
+export interface CallersResult {
+  target: SymbolResult;
+  callers: CallerResult[];
+  disambiguation?: SymbolResult[];
+  truncated?: boolean;
+}
+
+export interface PackedItem {
+  file: string;
+  kind: 'outline' | 'source';
+  name?: string;        // symbol name when kind === 'source'
+  tokens: number;
+  payload: OutlineResult | SourceResult;
+}
+
+export interface PackResult {
+  query: string;
+  budget_tokens: number;
+  total_tokens: number;
+  included: PackedItem[];
+  skipped: { file: string; kind: 'outline' | 'source'; name?: string; reason: string }[];
+}
+
+export interface ChangedFile {
+  path: string;
+  change_type: 'A' | 'M' | 'D';
+  outline?: OutlineResult;
+}
+
+export interface ChangedResult {
+  ref: string;
+  source: 'git' | 'mtime';
+  files: ChangedFile[];
+}
+
+export interface DiffOutlineEntry {
+  name: string;
+  kind: string;
+  line?: number;
+  signature?: string;
+}
+
+export interface DiffOutlineFile {
+  path: string;
+  added: DiffOutlineEntry[];
+  removed: DiffOutlineEntry[];
+  modified: { name: string; kind: string; before: DiffOutlineEntry; after: DiffOutlineEntry }[];
+}
+
+export interface DiffOutlineResult {
+  ref_a: string;
+  ref_b: string;
+  files: DiffOutlineFile[];
+}
+
+export interface SignatureResult {
+  name: string;
+  kind: string;
+  file: string;
+  line: number;
+  language: string;
+  signature?: string;
+  doc_summary?: string;
+}
+
+export interface UnusedExportResult {
+  file: string;
+  name: string;
+  kind: string;
+  line: number;
+}
+
+export interface DocResult {
+  name: string;
+  kind: string;
+  file: string;
+  line: number;
+  doc?: string;
+}
+
+export interface BatchSubResult {
+  tool: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+export interface BatchResult {
+  results: BatchSubResult[];
 }
 
 // ── Query Engine ──────────────────────────────────────────────────────
@@ -992,6 +1123,569 @@ export class QueryEngine {
    * Find a file row by path or path_key. Tries exact match first,
    * then case-insensitive, then suffix match (for partial paths).
    */
+  // ── New token-saver tools ───────────────────────────────────────────
+
+  /**
+   * Batch signature lookup: returns name + signature + doc summary for each
+   * input name, no body. Replaces N find/source calls when comparing siblings.
+   */
+  signatures(
+    names: string[],
+    opts?: { file?: string; kind?: string },
+  ): NexusResult<SignatureResult> {
+    const start = performance.now();
+    const query = `signatures ${names.join(',')}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.kind ? ` --kind ${opts.kind}` : ''}`;
+
+    if (names.length === 0) {
+      return this.wrap('signatures', query, [], start);
+    }
+
+    const rows = this.store.findSymbolsByNames(names);
+    const fileNorm = opts?.file ? normalizePath(opts.file).toLowerCase() : null;
+    const seen = new Set<string>();
+    const results: SignatureResult[] = [];
+
+    for (const row of rows) {
+      if (opts?.kind && row.kind !== opts.kind) continue;
+      if (fileNorm && !normalizePath(row.file_path).toLowerCase().endsWith(fileNorm)) continue;
+      const dedupKey = `${row.name}\0${row.file_path}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      results.push({
+        name: row.name,
+        kind: row.kind,
+        file: row.file_path,
+        line: row.line,
+        language: row.file_language,
+        ...(row.signature ? { signature: row.signature } : {}),
+        ...(row.doc ? { doc_summary: row.doc.split('\n')[0].trim() } : {}),
+      });
+    }
+
+    return this.wrap('signatures', query, results, start);
+  }
+
+  /**
+   * Just the docstring(s) for a symbol. Avoids reading source bodies when
+   * all you need is the comment block.
+   */
+  doc(name: string, opts?: { file?: string }): NexusResult<DocResult> {
+    const start = performance.now();
+    const query = `doc ${name}${opts?.file ? ` --file ${opts.file}` : ''}`;
+
+    let rows = this.store.getSymbolsWithFile(name);
+    if (rows.length === 0) {
+      rows = this.store.getSymbolsWithFileCaseInsensitive(name);
+    }
+
+    if (opts?.file && rows.length > 0) {
+      const norm = normalizePath(opts.file).toLowerCase();
+      rows = rows.filter(r => normalizePath(r.file_path).toLowerCase().endsWith(norm));
+    }
+
+    const results: DocResult[] = rows.map(row => ({
+      name: row.name,
+      kind: row.kind,
+      file: row.file_path,
+      line: row.line,
+      ...(row.doc ? { doc: row.doc } : {}),
+    }));
+
+    return this.wrap('doc', query, results, start);
+  }
+
+  /**
+   * All symbols of a given kind, optionally restricted to a path subtree.
+   * Replaces grep/search chains for "show me every <kind> in this folder".
+   */
+  kindIndex(
+    kind: string,
+    opts?: { path?: string; limit?: number },
+  ): NexusResult<SymbolResult> {
+    const start = performance.now();
+    const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 1000);
+    const query = `kind_index ${kind}${opts?.path ? ` --path ${opts.path}` : ''}${opts?.limit ? ` --limit ${opts.limit}` : ''}`;
+
+    const rows = this.store.getSymbolsByKindAndPath(kind, opts?.path);
+    const results = rows.slice(0, limit).map(r => symbolWithFileToResult(r));
+    return this.wrap('kind_index', query, results, start);
+  }
+
+  /**
+   * Inverse of slice: find every function/class that calls this symbol,
+   * grouped by caller, with one snippet per call site. Optional depth recurses
+   * upward through the call graph (heuristic, occurrence-based — same precision
+   * tier as nexus_slice).
+   */
+  callers(
+    name: string,
+    opts?: { file?: string; depth?: number; limit?: number },
+  ): NexusResult<CallersResult> {
+    const start = performance.now();
+    const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 100);
+    const depth = Math.min(Math.max(opts?.depth ?? 1, 1), 3);
+    const query = `callers ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.depth ? ` --depth ${opts.depth}` : ''}`;
+
+    let defs = this.store.getSymbolsWithFile(name);
+    if (defs.length === 0) {
+      defs = this.store.getSymbolsWithFileCaseInsensitive(name);
+    }
+
+    if (opts?.file && defs.length > 0) {
+      const norm = normalizePath(opts.file).toLowerCase();
+      defs = defs.filter(d => normalizePath(d.file_path).toLowerCase().endsWith(norm));
+    }
+
+    if (defs.length === 0) {
+      return this.wrap('callers', query, [], start);
+    }
+
+    defs.sort((a, b) => a.file_path.localeCompare(b.file_path) || a.line - b.line || a.col - b.col);
+    const target = defs[0];
+
+    const result: CallersResult = {
+      target: symbolWithFileToResult(target),
+      callers: this.findCallersForSymbol(target, depth, limit, new Set([target.id])),
+    };
+
+    if (defs.length > 1 && !opts?.file) {
+      result.disambiguation = defs.slice(1).map(symbolWithFileToResult);
+    }
+    if (result.callers.length >= limit) {
+      result.truncated = true;
+    }
+
+    return this.wrap('callers', query, [result], start);
+  }
+
+  private findCallersForSymbol(
+    target: SymbolWithFile,
+    depth: number,
+    limit: number,
+    visited: Set<number>,
+  ): CallerResult[] {
+    const occurrences = this.store.getOccurrencesByName(target.name);
+    const callerMap = new Map<number, { caller: SymbolWithFile; sites: CallerCallSite[] }>();
+
+    for (const occ of occurrences) {
+      // Skip the def line itself
+      if (occ.file_id === target.file_id && occ.line === target.line) continue;
+      // Skip occurrences inside the target's own body (recursive self-refs)
+      if (
+        occ.file_id === target.file_id &&
+        target.end_line != null &&
+        occ.line >= target.line &&
+        occ.line <= target.end_line
+      ) {
+        continue;
+      }
+
+      const enclosing = this.store.getEnclosingSymbol(occ.file_id, occ.line);
+      if (!enclosing || enclosing.id === target.id) continue;
+      if (visited.has(enclosing.id)) continue;
+
+      const existing = callerMap.get(enclosing.id);
+      const site: CallerCallSite = {
+        line: occ.line,
+        col: occ.col,
+        context: occ.context ?? '',
+      };
+
+      if (existing) {
+        existing.sites.push(site);
+      } else {
+        const filePath = this.store.getFileById(enclosing.file_id);
+        if (!filePath) continue;
+        callerMap.set(enclosing.id, {
+          caller: {
+            ...enclosing,
+            file_path: filePath.path,
+            file_language: filePath.language,
+          },
+          sites: [site],
+        });
+      }
+
+      if (callerMap.size >= limit) break;
+    }
+
+    const callers: CallerResult[] = [];
+    for (const { caller, sites } of callerMap.values()) {
+      const entry: CallerResult = {
+        caller: symbolWithFileToResult(caller),
+        call_sites: sites,
+      };
+      if (depth > 1) {
+        const nextVisited = new Set(visited);
+        nextVisited.add(caller.id);
+        const recursed = this.findCallersForSymbol(caller, depth - 1, limit, nextVisited);
+        if (recursed.length > 0) entry.callers = recursed;
+      }
+      callers.push(entry);
+    }
+
+    return callers;
+  }
+
+  /**
+   * LSP-style go-to-definition. Best-effort: identifies the identifier at
+   * (file, line, col?) and resolves it via the symbol table. Falls back to
+   * first identifier on the line when col is not provided.
+   */
+  definitionAt(
+    filePath: string,
+    line: number,
+    col?: number,
+  ): NexusResult<SourceResult> {
+    const start = performance.now();
+    const query = `definition_at ${filePath}:${line}${col != null ? `:${col}` : ''}`;
+
+    const file = this.findFile(filePath);
+    if (!file) return this.wrap('definition_at', query, [], start);
+
+    const root = this.store.getMeta('root_path') ?? '';
+    let lineText: string;
+    try {
+      const content = fs.readFileSync(path.resolve(root, file.path), 'utf-8');
+      const allLines = content.split('\n');
+      if (line < 1 || line > allLines.length) {
+        return this.wrap('definition_at', query, [], start);
+      }
+      lineText = allLines[line - 1];
+    } catch {
+      return this.wrap('definition_at', query, [], start);
+    }
+
+    const identifier = pickIdentifierAt(lineText, col);
+    if (!identifier) return this.wrap('definition_at', query, [], start);
+
+    let defs = this.store.getSymbolsWithFile(identifier);
+    if (defs.length === 0) {
+      defs = this.store.getSymbolsWithFileCaseInsensitive(identifier);
+    }
+
+    if (defs.length === 0) return this.wrap('definition_at', query, [], start);
+
+    // Prefer same-file def, then imported file, then anywhere
+    const importedFileIds = new Set(
+      this.store.getImportsByFileId(file.id)
+        .map(e => e.resolved_file_id)
+        .filter((id): id is number => id != null),
+    );
+    defs.sort((a, b) => {
+      const aScore = a.file_id === file.id ? 0 : importedFileIds.has(a.file_id) ? 1 : 2;
+      const bScore = b.file_id === file.id ? 0 : importedFileIds.has(b.file_id) ? 1 : 2;
+      return aScore - bScore || a.file_path.localeCompare(b.file_path) || a.line - b.line;
+    });
+
+    const source = this.getSourceForSymbol(defs[0]);
+    return this.wrap('definition_at', query, source ? [source] : [], start);
+  }
+
+  /**
+   * Find exports with no importers and no occurrences outside their own file.
+   * Best-effort dead-code finder. Note: re-exports through index.ts will
+   * appear unused if nothing imports them externally; filter by path to scope.
+   */
+  unusedExports(opts?: { path?: string; limit?: number }): NexusResult<UnusedExportResult> {
+    const start = performance.now();
+    const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
+    const query = `unused_exports${opts?.path ? ` --path ${opts.path}` : ''}`;
+
+    const exports = this.store.getAllExports(opts?.path);
+    const results: UnusedExportResult[] = [];
+
+    for (const exp of exports) {
+      if (results.length >= limit) break;
+      if (exp.is_star) continue; // star exports are pass-throughs
+      if (!exp.name) continue;
+
+      // Check if any other file imports this file (resolved_file_id match)
+      const importers = this.store.getImportersByResolvedFileId(exp.file_id);
+      const namedImporters = importers.filter(imp =>
+        imp.is_star || imp.is_default
+          ? false
+          : imp.name === exp.name || imp.alias === exp.name,
+      );
+      if (namedImporters.length > 0) continue;
+
+      // Check occurrences in OTHER files
+      const occurrences = this.store.getOccurrencesByName(exp.name);
+      const externalOccurrences = occurrences.filter(o => o.file_id !== exp.file_id);
+      if (externalOccurrences.length > 0) continue;
+
+      // Look up kind via local symbol if available
+      let kind = 'export';
+      if (exp.symbol_id != null) {
+        const allFileSyms = this.store.getSymbolsByFileId(exp.file_id);
+        const sym = allFileSyms.find(s => s.id === exp.symbol_id);
+        if (sym) kind = sym.kind;
+      }
+
+      results.push({
+        file: exp.file_path,
+        name: exp.name,
+        kind,
+        line: exp.line,
+      });
+    }
+
+    return this.wrap('unused_exports', query, results, start);
+  }
+
+  /**
+   * Token-budget-aware context bundler. Greedy: outlines first (cheap, high
+   * coverage), then top-ranked sources, then directly-imported file outlines.
+   * Token estimate is chars/4 — deterministic and fast, deliberately rough.
+   */
+  pack(
+    queryText: string,
+    opts?: { budget_tokens?: number; paths?: string[] },
+  ): NexusResult<PackResult> {
+    const start = performance.now();
+    const budget = Math.min(Math.max(opts?.budget_tokens ?? 4000, 200), 50000);
+    const queryStr = `pack ${queryText} --budget ${budget}${opts?.paths ? ` --paths ${opts.paths.join(',')}` : ''}`;
+
+    const ranked: (SymbolWithFile & { _score: number })[] = [];
+    const paths = opts?.paths && opts.paths.length > 0 ? opts.paths : [undefined];
+
+    for (const p of paths) {
+      const search = this.search(queryText, 30, undefined, p);
+      for (const r of search.results) {
+        // Re-look up the row so we have the SymbolWithFile shape
+        const matches = this.store.getSymbolsWithFile(r.name);
+        for (const m of matches) {
+          if (m.file_path === r.file && m.line === r.line) {
+            ranked.push({ ...m, _score: (r as { _score?: number })._score ?? 0 });
+            break;
+          }
+        }
+      }
+    }
+
+    ranked.sort((a, b) => b._score - a._score);
+
+    const included: PackedItem[] = [];
+    const skipped: PackResult['skipped'] = [];
+    let totalTokens = 0;
+    const seenOutlines = new Set<string>();
+    const seenSources = new Set<string>();
+
+    const tryAdd = (item: PackedItem, cap: number): boolean => {
+      if (totalTokens + item.tokens > cap) {
+        skipped.push({
+          file: item.file,
+          kind: item.kind,
+          ...(item.name ? { name: item.name } : {}),
+          reason: 'budget',
+        });
+        return false;
+      }
+      included.push(item);
+      totalTokens += item.tokens;
+      return true;
+    };
+
+    // Phase A — file outlines for every file containing a top hit (~30%)
+    const phaseACap = Math.floor(budget * 0.3);
+    for (const sym of ranked) {
+      if (seenOutlines.has(sym.file_path)) continue;
+      const outline = this.outline(sym.file_path);
+      if (outline.results.length === 0) continue;
+      const payload = outline.results[0];
+      const tokens = estimateTokens(JSON.stringify(payload));
+      if (!tryAdd({ file: sym.file_path, kind: 'outline', tokens, payload }, phaseACap)) break;
+      seenOutlines.add(sym.file_path);
+    }
+
+    // Phase B — top symbol sources (~60% cumulative)
+    const phaseBCap = Math.floor(budget * 0.6);
+    for (const sym of ranked) {
+      const key = `${sym.file_path}\0${sym.name}`;
+      if (seenSources.has(key)) continue;
+      const source = this.getSourceForSymbol(sym);
+      if (!source) continue;
+      const tokens = estimateTokens(source.source);
+      if (!tryAdd({ file: sym.file_path, kind: 'source', name: sym.name, tokens, payload: source }, phaseBCap)) {
+        if (totalTokens >= phaseBCap) break;
+        continue;
+      }
+      seenSources.add(key);
+    }
+
+    // Phase C — direct imports of files we've touched (remaining budget)
+    const touchedFileIds = new Set<number>();
+    for (const sym of ranked) touchedFileIds.add(sym.file_id);
+    for (const fileId of touchedFileIds) {
+      const importEdges = this.store.getImportsByFileId(fileId);
+      for (const edge of importEdges) {
+        if (edge.resolved_file_id == null) continue;
+        const importedFile = this.store.getFileById(edge.resolved_file_id);
+        if (!importedFile) continue;
+        if (seenOutlines.has(importedFile.path)) continue;
+        const outline = this.outline(importedFile.path);
+        if (outline.results.length === 0) continue;
+        const payload = outline.results[0];
+        const tokens = estimateTokens(JSON.stringify(payload));
+        if (!tryAdd({ file: importedFile.path, kind: 'outline', tokens, payload }, budget)) break;
+        seenOutlines.add(importedFile.path);
+      }
+      if (totalTokens >= budget) break;
+    }
+
+    const result: PackResult = {
+      query: queryText,
+      budget_tokens: budget,
+      total_tokens: totalTokens,
+      included,
+      skipped,
+    };
+    return this.wrap('pack', queryStr, [result], start);
+  }
+
+  /**
+   * Files changed since `ref` (default HEAD~1) with their current outlines.
+   * Uses git when available; falls back to mtime > last_index_run.completed_at.
+   */
+  changed(opts?: { ref?: string }): NexusResult<ChangedResult> {
+    const start = performance.now();
+    const ref = opts?.ref ?? 'HEAD~1';
+    const queryStr = `changed --ref ${ref}`;
+
+    const root = this.store.getMeta('root_path') ?? '';
+    const indexedByPath = new Map<string, FileRow & { id: number }>();
+    for (const f of this.store.getAllFiles()) {
+      indexedByPath.set(normalizePath(f.path), f);
+    }
+
+    let files: ChangedFile[] = [];
+    let source: 'git' | 'mtime' = 'mtime';
+
+    try {
+      const out = execFileSync('git', ['diff', '--name-status', `${ref}...HEAD`], {
+        cwd: root,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      source = 'git';
+      const lines = out.split('\n').filter(Boolean);
+      for (const line of lines) {
+        const parts = line.split(/\s+/);
+        const status = parts[0];
+        const filePath = normalizePath(parts[parts.length - 1]);
+        const change_type: 'A' | 'M' | 'D' =
+          status.startsWith('A') ? 'A' : status.startsWith('D') ? 'D' : 'M';
+        const indexed = indexedByPath.get(filePath);
+        if (change_type !== 'D' && indexed) {
+          const outline = this.outline(filePath);
+          files.push({
+            path: filePath,
+            change_type,
+            ...(outline.results[0] ? { outline: outline.results[0] } : {}),
+          });
+        } else {
+          files.push({ path: filePath, change_type });
+        }
+      }
+    } catch {
+      // mtime fallback
+      const lastRun = this.store.getLastIndexRun();
+      const cutoff = lastRun?.completed_at ? Date.parse(lastRun.completed_at) / 1000 : 0;
+      for (const file of indexedByPath.values()) {
+        if (file.mtime > cutoff) {
+          const outline = this.outline(file.path);
+          files.push({
+            path: file.path,
+            change_type: 'M',
+            ...(outline.results[0] ? { outline: outline.results[0] } : {}),
+          });
+        }
+      }
+    }
+
+    return this.wrap('changed', queryStr, [{ ref, source, files }], start);
+  }
+
+  /**
+   * Semantic diff: which symbols were added/removed/modified between two refs.
+   * Re-parses historical content via `git show` through the live extractor.
+   */
+  diffOutline(
+    refA: string,
+    refB?: string,
+  ): NexusResult<DiffOutlineResult> {
+    const start = performance.now();
+    const target = refB ?? 'HEAD';
+    const queryStr = `diff_outline ${refA} ${target}`;
+
+    const root = this.store.getMeta('root_path') ?? '';
+    const indexedByPath = new Map<string, FileRow & { id: number }>();
+    for (const f of this.store.getAllFiles()) {
+      indexedByPath.set(normalizePath(f.path), f);
+    }
+
+    let changedPaths: { path: string; status: string }[] = [];
+    try {
+      const out = execFileSync('git', ['diff', '--name-status', `${refA}..${target}`], {
+        cwd: root,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      changedPaths = out
+        .split('\n')
+        .filter(Boolean)
+        .map(line => {
+          const parts = line.split(/\s+/);
+          return { status: parts[0], path: normalizePath(parts[parts.length - 1]) };
+        });
+    } catch (err) {
+      return this.wrap('diff_outline', queryStr, [{
+        ref_a: refA,
+        ref_b: target,
+        files: [],
+      }], start);
+    }
+
+    const files: DiffOutlineFile[] = [];
+
+    for (const { path: filePath, status } of changedPaths) {
+      const indexed = indexedByPath.get(filePath);
+      if (!indexed) continue;
+
+      const beforeSyms = readHistoricalSymbols(root, refA, filePath, indexed.language);
+      const afterSyms = status.startsWith('D')
+        ? []
+        : readHistoricalSymbols(root, target, filePath, indexed.language);
+
+      const beforeMap = new Map(beforeSyms.map(s => [`${s.kind}\0${s.name}`, s]));
+      const afterMap = new Map(afterSyms.map(s => [`${s.kind}\0${s.name}`, s]));
+
+      const added: DiffOutlineEntry[] = [];
+      const removed: DiffOutlineEntry[] = [];
+      const modified: DiffOutlineFile['modified'] = [];
+
+      for (const [key, after] of afterMap) {
+        if (!beforeMap.has(key)) {
+          added.push(after);
+        } else {
+          const before = beforeMap.get(key)!;
+          if ((before.signature ?? '') !== (after.signature ?? '')) {
+            modified.push({ name: after.name, kind: after.kind, before, after });
+          }
+        }
+      }
+      for (const [key, before] of beforeMap) {
+        if (!afterMap.has(key)) removed.push(before);
+      }
+
+      if (added.length || removed.length || modified.length) {
+        files.push({ path: filePath, added, removed, modified });
+      }
+    }
+
+    return this.wrap('diff_outline', queryStr, [{ ref_a: refA, ref_b: target, files }], start);
+  }
+
   private findFile(filePath: string): (FileRow & { id: number }) | undefined {
     const normalized = normalizePath(filePath);
 
@@ -1134,6 +1828,69 @@ function buildSliceQuery(
   opts?: { file?: string; limit?: number },
 ): string {
   return `slice ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.limit ? ` --limit ${opts.limit}` : ''}`;
+}
+
+/** Cheap deterministic token estimate (chars / 4). */
+function estimateTokens(s: string): number {
+  return Math.ceil(s.length / 4);
+}
+
+/**
+ * Read a file at a historical git ref and re-extract its top-level symbols.
+ * Returns an empty array when the file did not exist at that ref.
+ */
+function readHistoricalSymbols(
+  root: string,
+  ref: string,
+  filePath: string,
+  language: string,
+): DiffOutlineEntry[] {
+  let content: string;
+  try {
+    content = execFileSync('git', ['show', `${ref}:${filePath}`], {
+      cwd: root,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 50 * 1024 * 1024,
+    });
+  } catch {
+    return [];
+  }
+
+  const result = extractSource(content, filePath, language);
+  if (!result.parsed) return [];
+
+  return result.symbols.map(s => ({
+    name: s.name,
+    kind: s.kind,
+    line: s.line,
+    ...(s.signature ? { signature: s.signature } : {}),
+  }));
+}
+
+/** Extract the identifier (word boundary) at column `col` from a line. */
+function pickIdentifierAt(lineText: string, col?: number): string | null {
+  const idRegex = /[A-Za-z_$][A-Za-z0-9_$]*/g;
+  const matches: { word: string; start: number; end: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = idRegex.exec(lineText)) !== null) {
+    matches.push({ word: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  if (matches.length === 0) return null;
+  if (col == null) return matches[0].word;
+
+  // Columns from MCP/CLI are typically 1-based; line offsets are 0-based.
+  const offset = Math.max(0, col - 1);
+  const hit = matches.find(x => offset >= x.start && offset <= x.end);
+  if (hit) return hit.word;
+  // Nearest fallback
+  let nearest = matches[0];
+  let best = Math.abs(offset - nearest.start);
+  for (const m of matches) {
+    const d = Math.min(Math.abs(offset - m.start), Math.abs(offset - m.end));
+    if (d < best) { best = d; nearest = m; }
+  }
+  return nearest.word;
 }
 
 function getSlicePreferenceScore(

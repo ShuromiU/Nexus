@@ -93,6 +93,7 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name      ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_name_ci   ON symbols(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_symbols_kind      ON symbols(kind);
 CREATE INDEX IF NOT EXISTS idx_symbols_file_kind ON symbols(file_id, kind);
+CREATE INDEX IF NOT EXISTS idx_symbols_file_range ON symbols(file_id, line, end_line);
 CREATE INDEX IF NOT EXISTS idx_edges_file        ON module_edges(file_id);
 CREATE INDEX IF NOT EXISTS idx_edges_source      ON module_edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_name        ON module_edges(name);

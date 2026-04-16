@@ -588,6 +588,81 @@ export class NexusStore {
       .all(...names) as SymbolWithFile[];
   }
 
+  /**
+   * Find the smallest symbol whose [line, end_line] range contains `line`.
+   * Used by callers/definition_at to identify the function/class enclosing a position.
+   */
+  getEnclosingSymbol(
+    fileId: number,
+    line: number,
+  ): (SymbolRow & { id: number }) | undefined {
+    return this.db
+      .prepare(
+        `SELECT *
+         FROM symbols
+         WHERE file_id = ?
+           AND line <= ?
+           AND end_line IS NOT NULL
+           AND end_line >= ?
+         ORDER BY (end_line - line) ASC
+         LIMIT 1`,
+      )
+      .get(fileId, line, line) as (SymbolRow & { id: number }) | undefined;
+  }
+
+  /**
+   * All exports across the index (kind='export' module edges joined to file).
+   * Optional path prefix filter. Excludes re-exports — those are pass-throughs.
+   */
+  getAllExports(pathPrefix?: string): {
+    file_id: number;
+    file_path: string;
+    name: string;
+    line: number;
+    symbol_id: number | null;
+    is_default: number;
+    is_star: number;
+  }[] {
+    const sql = `
+      SELECT e.file_id, f.path AS file_path, e.name, e.line, e.symbol_id,
+             e.is_default, e.is_star
+      FROM module_edges e
+      JOIN files f ON e.file_id = f.id
+      WHERE e.kind = 'export'
+        AND e.name IS NOT NULL
+        ${pathPrefix ? 'AND f.path LIKE ?' : ''}
+      ORDER BY f.path, e.line`;
+    const params = pathPrefix ? [`${pathPrefix}%`] : [];
+    return this.db.prepare(sql).all(...params) as ReturnType<NexusStore['getAllExports']>;
+  }
+
+  /**
+   * List symbols of a kind, optionally restricted to files under a path prefix.
+   */
+  getSymbolsByKindAndPath(kind: string, pathPrefix?: string): SymbolWithFile[] {
+    if (pathPrefix) {
+      return this.db
+        .prepare(
+          `SELECT s.*, f.path AS file_path, f.language AS file_language
+           FROM symbols s
+           JOIN files f ON s.file_id = f.id
+           WHERE s.kind = ?
+             AND f.path LIKE ?
+           ORDER BY f.path, s.line, s.col`,
+        )
+        .all(kind, `${pathPrefix}%`) as SymbolWithFile[];
+    }
+    return this.db
+      .prepare(
+        `SELECT s.*, f.path AS file_path, f.language AS file_language
+         FROM symbols s
+         JOIN files f ON s.file_id = f.id
+         WHERE s.kind = ?
+         ORDER BY f.path, s.line, s.col`,
+      )
+      .all(kind) as SymbolWithFile[];
+  }
+
   // ── Index Runs ──────────────────────────────────────────────────────
 
   insertIndexRun(run: IndexRunRow): number {

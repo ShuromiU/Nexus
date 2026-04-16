@@ -1095,3 +1095,283 @@ describe('rankResults', () => {
     expect(ranked[2].name).toBe('a');
   });
 });
+
+// ── New token-saver tools ─────────────────────────────────────────────
+
+describe('QueryEngine.signatures', () => {
+  let db: Database.Database;
+  let engine: QueryEngine;
+
+  beforeEach(() => {
+    db = createTestDb();
+    seedTestData(new NexusStore(db));
+    engine = new QueryEngine(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('returns signature + doc summary, no body', () => {
+    const result = engine.signatures(['formatDate', 'Button']);
+    expect(result.type).toBe('signatures');
+    expect(result.results.length).toBeGreaterThan(0);
+    const fmt = result.results.find(r => r.name === 'formatDate');
+    expect(fmt?.signature).toBe('(date: Date) => string');
+    expect(fmt?.doc_summary).toBe('Formats a date');
+    // Bodies are not included
+    expect((fmt as unknown as { source?: string }).source).toBeUndefined();
+  });
+
+  it('returns empty for empty input', () => {
+    const result = engine.signatures([]);
+    expect(result.results).toEqual([]);
+  });
+
+  it('filters by kind', () => {
+    const result = engine.signatures(['formatDate', 'Button'], { kind: 'function' });
+    expect(result.results.every(r => r.kind === 'function')).toBe(true);
+  });
+
+  it('dedupes by (name, file)', () => {
+    const result = engine.signatures(['formatDate', 'formatDate']);
+    const fmts = result.results.filter(r => r.name === 'formatDate');
+    expect(fmts.length).toBe(1);
+  });
+});
+
+describe('QueryEngine.doc', () => {
+  let db: Database.Database;
+  let engine: QueryEngine;
+
+  beforeEach(() => {
+    db = createTestDb();
+    seedTestData(new NexusStore(db));
+    engine = new QueryEngine(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('returns just the docstring', () => {
+    const result = engine.doc('formatDate');
+    expect(result.type).toBe('doc');
+    expect(result.results[0]?.doc).toBe('Formats a date');
+    expect((result.results[0] as unknown as { source?: string }).source).toBeUndefined();
+  });
+
+  it('returns symbol with no doc when none recorded', () => {
+    const result = engine.doc('parseDate');
+    expect(result.results.length).toBe(1);
+    expect(result.results[0].doc).toBeUndefined();
+  });
+
+  it('returns empty for unknown symbol', () => {
+    const result = engine.doc('NoSuchThing');
+    expect(result.results).toEqual([]);
+  });
+});
+
+describe('QueryEngine.kindIndex', () => {
+  let db: Database.Database;
+  let engine: QueryEngine;
+
+  beforeEach(() => {
+    db = createTestDb();
+    seedTestData(new NexusStore(db));
+    engine = new QueryEngine(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('lists every symbol of a given kind', () => {
+    const result = engine.kindIndex('function');
+    expect(result.type).toBe('kind_index');
+    const names = result.results.map(r => r.name);
+    expect(names).toContain('formatDate');
+    expect(names).toContain('parseDate');
+  });
+
+  it('respects path prefix', () => {
+    const result = engine.kindIndex('component', { path: 'src/components' });
+    expect(result.results.length).toBe(1);
+    expect(result.results[0].name).toBe('Button');
+  });
+
+  it('returns empty for unknown kind', () => {
+    const result = engine.kindIndex('quokka');
+    expect(result.results).toEqual([]);
+  });
+
+  it('respects limit', () => {
+    const result = engine.kindIndex('function', { limit: 1 });
+    expect(result.results.length).toBe(1);
+  });
+});
+
+describe('QueryEngine.callers', () => {
+  let db: Database.Database;
+  let engine: QueryEngine;
+
+  beforeEach(() => {
+    db = createTestDb();
+    const store = new NexusStore(db);
+    seedTestData(store);
+
+    // Add an enclosing symbol in Button.tsx whose body contains the formatDate call site at line 15
+    store.insertSymbols([
+      { file_id: 2, name: 'render', kind: 'function', line: 12, col: 0, end_line: 28, signature: '() => JSX.Element' },
+    ]);
+    engine = new QueryEngine(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('finds enclosing symbol of an external call site', () => {
+    const result = engine.callers('formatDate');
+    expect(result.type).toBe('callers');
+    expect(result.results.length).toBe(1);
+    const callers = result.results[0].callers;
+    const renderCaller = callers.find(c => c.caller.name === 'render');
+    expect(renderCaller).toBeDefined();
+    expect(renderCaller!.call_sites.length).toBeGreaterThan(0);
+  });
+
+  it('excludes the def line itself', () => {
+    const result = engine.callers('formatDate');
+    const sites = result.results[0].callers.flatMap(c => c.call_sites);
+    // Definition is at line 5 in file 1 — must not appear
+    expect(sites.find(s => s.line === 5 && s.context.includes('export function formatDate'))).toBeUndefined();
+  });
+
+  it('returns empty target list when symbol does not exist', () => {
+    const result = engine.callers('NoSuchSymbol');
+    expect(result.results).toEqual([]);
+  });
+});
+
+describe('QueryEngine.unusedExports', () => {
+  let db: Database.Database;
+  let engine: QueryEngine;
+
+  beforeEach(() => {
+    db = createTestDb();
+    seedTestData(new NexusStore(db));
+    engine = new QueryEngine(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('returns DateFormat as unused (not imported, no external occurrences)', () => {
+    const result = engine.unusedExports();
+    expect(result.type).toBe('unused_exports');
+    const names = result.results.map(r => r.name);
+    expect(names).toContain('DateFormat');
+    // formatDate is used externally (Button imports it + has occurrence) — should NOT appear
+    expect(names).not.toContain('formatDate');
+  });
+
+  it('respects path prefix', () => {
+    const result = engine.unusedExports({ path: 'src/components' });
+    // Button is exported as default — has no name match, so it's filtered too
+    // Just check no formatDate (lives in src/utils)
+    expect(result.results.find(r => r.name === 'formatDate')).toBeUndefined();
+  });
+});
+
+describe('QueryEngine.definitionAt', () => {
+  let db: Database.Database;
+  let engine: QueryEngine;
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-defat-'));
+    fs.mkdirSync(path.join(tmpRoot, 'src', 'components'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRoot, 'src', 'utils.ts'),
+      'const MAX_RETRIES = 3;\nexport type DateFormat = "iso" | "us";\nexport function formatDate(date) { return String(date); }\n',
+    );
+    fs.writeFileSync(
+      path.join(tmpRoot, 'src', 'components', 'Button.tsx'),
+      Array(14).fill('// pad').join('\n') + '\n  const formatted = formatDate(new Date());\n',
+    );
+
+    db = createTestDb();
+    const store = new NexusStore(db);
+    seedTestData(store);
+    store.setMeta('root_path', tmpRoot);
+    engine = new QueryEngine(db);
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('resolves identifier on a line to its definition source', () => {
+    // Line 15 in Button.tsx → "  const formatted = formatDate(new Date());"
+    const result = engine.definitionAt('src/components/Button.tsx', 15, 22);
+    expect(result.type).toBe('definition_at');
+    expect(result.results.length).toBe(1);
+    expect(result.results[0].name).toBe('formatDate');
+  });
+
+  it('returns empty when file is not indexed', () => {
+    const result = engine.definitionAt('no/such/file.ts', 1);
+    expect(result.results).toEqual([]);
+  });
+});
+
+describe('compactify', () => {
+  it('drops envelope chrome and renames keys', async () => {
+    const { compactify } = await import('../src/query/compact.js');
+    const verbose = {
+      query: 'find foo',
+      type: 'find' as const,
+      results: [{ name: 'foo', kind: 'function', file: 'a.ts', line: 5, col: 0, language: 'typescript' }],
+      count: 1,
+      index_status: 'current' as const,
+      index_health: 'ok' as const,
+      timing_ms: 1.2,
+    };
+    const compact = compactify(verbose) as { ty: string; r: { nm: string; k: string; f: string; l: number; lg: string }[] };
+    expect(compact.ty).toBe('find');
+    expect(compact.r[0].nm).toBe('foo');
+    expect(compact.r[0].k).toBe('function');
+    expect(compact.r[0].f).toBe('a.ts');
+    expect((compact as unknown as { query?: string }).query).toBeUndefined();
+    expect((compact as unknown as { timing_ms?: number }).timing_ms).toBeUndefined();
+  });
+
+  it('payload is meaningfully smaller than verbose', async () => {
+    const { compactify } = await import('../src/query/compact.js');
+    const verbose = {
+      query: 'find foo',
+      type: 'find' as const,
+      results: [
+        { name: 'foo', kind: 'function', file: 'a.ts', line: 5, col: 0, end_line: 10, signature: 'foo()', language: 'typescript' },
+        { name: 'bar', kind: 'function', file: 'b.ts', line: 1, col: 0, end_line: 3, signature: 'bar()', language: 'typescript' },
+      ],
+      count: 2,
+      index_status: 'current' as const,
+      index_health: 'ok' as const,
+      timing_ms: 0.5,
+    };
+    const verboseLen = JSON.stringify(verbose).length;
+    const compactLen = JSON.stringify(compactify(verbose)).length;
+    expect(compactLen).toBeLessThan(verboseLen * 0.7);
+  });
+
+  it('drops null, undefined, empty string, false flags', async () => {
+    const { compactify } = await import('../src/query/compact.js');
+    const verbose = {
+      query: 'q',
+      type: 'find' as const,
+      results: [{ name: 'foo', kind: 'function', file: 'a.ts', line: 5, col: 0, signature: '', is_default: false, language: 'typescript' }],
+      count: 1,
+      index_status: 'current' as const,
+      index_health: 'ok' as const,
+      timing_ms: 0,
+    };
+    const compact = compactify(verbose) as { r: Record<string, unknown>[] };
+    expect(compact.r[0].s).toBeUndefined(); // signature: '' dropped
+    expect(compact.r[0].id).toBeUndefined(); // is_default: false dropped
+  });
+});

@@ -36,10 +36,17 @@ export type { IndexResult } from './index/orchestrator.js';
 // Query engine
 export { QueryEngine } from './query/engine.js';
 export type {
-  NexusResult, SymbolResult, OccurrenceResult,
+  NexusResult, NexusResultType, SymbolResult, OccurrenceResult,
   ModuleEdgeResult, ImporterResult, GrepResult, TreeEntry, IndexStats,
   OutlineEntry, OutlineResult, BatchOutlineResult, SourceResult, SliceResult, DepNode, DepsResult,
+  CallerCallSite, CallerResult, CallersResult,
+  PackedItem, PackResult,
+  ChangedFile, ChangedResult,
+  DiffOutlineEntry, DiffOutlineFile, DiffOutlineResult,
+  SignatureResult, UnusedExportResult, DocResult,
+  BatchSubResult, BatchResult,
 } from './query/engine.js';
+export { compactify, compactifyValue, maybeCompactify, COMPACT_KEY_MAP } from './query/compact.js';
 export { fuzzyScore, rankResults } from './query/ranking.js';
 export type { FuzzyMatch } from './query/ranking.js';
 
