@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 1;
-export const EXTRACTOR_VERSION = 2;
+export const SCHEMA_VERSION = 2;
+export const EXTRACTOR_VERSION = 3;
 
 const TABLES = `
 -- Metadata (version tracking, invalidation, filesystem info)
@@ -84,7 +84,8 @@ CREATE TABLE IF NOT EXISTS occurrences (
   line       INTEGER NOT NULL,
   col        INTEGER NOT NULL,
   context    TEXT,
-  confidence TEXT NOT NULL DEFAULT 'heuristic'
+  confidence TEXT NOT NULL DEFAULT 'heuristic',
+  ref_kind   TEXT
 );
 `;
 
@@ -100,6 +101,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_name        ON module_edges(name);
 CREATE INDEX IF NOT EXISTS idx_edges_resolved    ON module_edges(resolved_file_id);
 CREATE INDEX IF NOT EXISTS idx_occur_name        ON occurrences(name);
 CREATE INDEX IF NOT EXISTS idx_occur_file        ON occurrences(file_id);
+CREATE INDEX IF NOT EXISTS idx_occur_name_refkind ON occurrences(name, ref_kind);
 CREATE INDEX IF NOT EXISTS idx_files_language    ON files(language);
 CREATE INDEX IF NOT EXISTS idx_files_status      ON files(status);
 `;

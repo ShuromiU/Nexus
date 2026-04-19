@@ -716,3 +716,40 @@ describe('IndexLock', () => {
     expect(lock.getLockInfo()).toBeNull();
   });
 });
+
+describe('schema v2 ref_kind', () => {
+  it('SCHEMA_VERSION is 2', async () => {
+    const { SCHEMA_VERSION } = await import('../src/db/schema.js');
+    expect(SCHEMA_VERSION).toBe(2);
+  });
+
+  it('occurrences table has a nullable ref_kind column', () => {
+    const db = new Database(':memory:');
+    applySchema(db);
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as {
+      name: string;
+      type: string;
+      notnull: number;
+    }[];
+    const refKind = cols.find(c => c.name === 'ref_kind');
+    expect(refKind).toBeDefined();
+    expect(refKind!.type.toUpperCase()).toBe('TEXT');
+    expect(refKind!.notnull).toBe(0);
+  });
+
+  it('accepts NULL ref_kind via insert', () => {
+    const db = new Database(':memory:');
+    applySchema(db);
+    initializeMeta(db, '/test', true);
+    const store = new NexusStore(db);
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrence({
+      file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'heuristic',
+    });
+    const row = db.prepare('SELECT ref_kind FROM occurrences WHERE name = ?').get('foo') as { ref_kind: string | null };
+    expect(row.ref_kind).toBeNull();
+  });
+});

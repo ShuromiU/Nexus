@@ -51,6 +51,7 @@ export interface OccurrenceRow {
   col: number;
   context?: string | null;
   confidence: string;
+  ref_kind?: string | null;
 }
 
 export interface IndexRunRow {
