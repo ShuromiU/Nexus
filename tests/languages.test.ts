@@ -435,3 +435,49 @@ describe('C# adapter', () => {
     });
   });
 });
+
+// ── TypeScript ref_kind classification ────────────────────────────────
+
+describe('typescript adapter — ref_kind classification', () => {
+  it('emits declaration for top-level function name', async () => {
+    const { extractOccurrencesForTest } = await import('../src/analysis/languages/typescript.js');
+    const src = 'export function greet(name: string): string { return name; }';
+    const occs = extractOccurrencesForTest(src);
+    const greet = occs.find(o => o.name === 'greet');
+    expect(greet?.ref_kind).toBe('declaration');
+  });
+
+  it('emits call for function invocation', async () => {
+    const { extractOccurrencesForTest } = await import('../src/analysis/languages/typescript.js');
+    // Use a multi-char name — single-char identifiers are filtered by the
+    // occurrence walker's `name.length > 1` guard.
+    const src = 'function fn() {} fn();';
+    const occs = extractOccurrencesForTest(src);
+    const calls = occs.filter(o => o.name === 'fn' && o.ref_kind === 'call');
+    expect(calls.length).toBe(1);
+  });
+
+  it('emits type-ref for type position', async () => {
+    const { extractOccurrencesForTest } = await import('../src/analysis/languages/typescript.js');
+    const src = 'type Foo = number; const x: Foo = 1 as Foo;';
+    const occs = extractOccurrencesForTest(src);
+    const typeRefs = occs.filter(o => o.name === 'Foo' && o.ref_kind === 'type-ref');
+    expect(typeRefs.length).toBe(2);
+  });
+
+  it('emits write for LHS of assignment', async () => {
+    const { extractOccurrencesForTest } = await import('../src/analysis/languages/typescript.js');
+    const src = 'let xs = 0; xs = 1;';
+    const occs = extractOccurrencesForTest(src);
+    const writes = occs.filter(o => o.name === 'xs' && o.ref_kind === 'write');
+    expect(writes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('emits read by default', async () => {
+    const { extractOccurrencesForTest } = await import('../src/analysis/languages/typescript.js');
+    const src = 'let xs = 0; const ys = xs + 1;';
+    const occs = extractOccurrencesForTest(src);
+    const reads = occs.filter(o => o.name === 'xs' && o.ref_kind === 'read');
+    expect(reads.length).toBeGreaterThanOrEqual(1);
+  });
+});
