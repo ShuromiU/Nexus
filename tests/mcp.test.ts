@@ -65,6 +65,22 @@ function seedTestData(store: NexusStore) {
 
 // ── Tool Registration Tests ───────────────────────────────────────────
 
+/**
+ * Fetch the list of registered tools from a freshly-built MCP server by
+ * invoking its internal `tools/list` handler. Accesses the private
+ * `_requestHandlers` map — no public getter is exposed, but this is stable
+ * enough for schema-surface tests. Returns the `tools` array directly.
+ */
+async function getRegisteredTools(): Promise<Array<{ name: string; inputSchema: unknown }>> {
+  const server = createMcpServer();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handlers = (server as any)._requestHandlers as Map<string, (req: unknown, extra: unknown) => Promise<{ tools: Array<{ name: string; inputSchema: unknown }> }>>;
+  const handler = handlers.get('tools/list');
+  if (!handler) throw new Error('tools/list handler not registered');
+  const result = await handler({ method: 'tools/list', params: {} }, {});
+  return result.tools;
+}
+
 describe('MCP server', () => {
   it('creates server without errors', () => {
     const server = createMcpServer();
@@ -89,6 +105,31 @@ describe('MCP server', () => {
     const server = createMcpServer();
     expect(server).toBeDefined();
     expect(expectedTools).toHaveLength(11);
+  });
+});
+
+describe('MCP schemas surface new options', () => {
+  it('nexus_callers schema includes ref_kinds', async () => {
+    const tools = await getRegisteredTools();
+    const callers = tools.find(t => t.name === 'nexus_callers');
+    expect(callers).toBeDefined();
+    const schema = callers!.inputSchema as { properties?: Record<string, unknown> };
+    expect(schema.properties).toHaveProperty('ref_kinds');
+  });
+
+  it('nexus_slice schema includes ref_kinds', async () => {
+    const tools = await getRegisteredTools();
+    const slice = tools.find(t => t.name === 'nexus_slice');
+    expect(slice).toBeDefined();
+    const schema = slice!.inputSchema as { properties?: Record<string, unknown> };
+    expect(schema.properties).toHaveProperty('ref_kinds');
+  });
+
+  it('nexus_unused_exports schema includes mode', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_unused_exports');
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
+    expect(schema.properties).toHaveProperty('mode');
   });
 });
 

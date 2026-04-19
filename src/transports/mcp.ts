@@ -267,6 +267,17 @@ export function createMcpServer(): Server {
               name: { type: 'string', description: 'Symbol name to slice around' },
               file: { type: 'string', description: 'Optional file path to narrow ambiguous symbols' },
               limit: { type: 'number', description: 'Max referenced symbols to include (default: 20, max: 50)' },
+              ref_kinds: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                  enum: ['call', 'read', 'write', 'type-ref', 'declaration'],
+                },
+                description:
+                  'Optional filter: restrict to occurrences with these ref_kinds. ' +
+                  'Only TypeScript/JavaScript files currently populate ref_kind — other ' +
+                  'languages return no results under this filter.',
+              },
               ...COMPACT_PROP,
             },
             required: ['name'],
@@ -315,6 +326,17 @@ export function createMcpServer(): Server {
               file: { type: 'string', description: 'Optional file path to disambiguate when the name has multiple defs' },
               depth: { type: 'number', description: 'Recursion depth, 1-3 (default 1)' },
               limit: { type: 'number', description: 'Max callers per level (default 30, max 100)' },
+              ref_kinds: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                  enum: ['call', 'read', 'write', 'type-ref', 'declaration'],
+                },
+                description:
+                  'Optional filter: restrict to occurrences with these ref_kinds. ' +
+                  'Only TypeScript/JavaScript files currently populate ref_kind — other ' +
+                  'languages return no results under this filter.',
+              },
               ...COMPACT_PROP,
             },
             required: ['name'],
@@ -394,6 +416,14 @@ export function createMcpServer(): Server {
             properties: {
               path: { type: 'string', description: 'Optional path prefix to scope (e.g. "src/")' },
               limit: { type: 'number', description: 'Max results (default 100, max 500)' },
+              mode: {
+                type: 'string',
+                enum: ['default', 'runtime_only'],
+                description:
+                  'default (unchanged): any use counts. runtime_only: type-only ' +
+                  'imports and type-ref occurrences are ignored — flags runtime-dead ' +
+                  'exports while preserving type-only-used exports under default mode.',
+              },
               ...COMPACT_PROP,
             },
           },
@@ -487,7 +517,11 @@ export function createMcpServer(): Server {
       case 'nexus_source':
         return qe.source(args.name as string, args.file as string | undefined);
       case 'nexus_slice':
-        return qe.slice(args.name as string, { file: args.file as string | undefined, limit: args.limit as number | undefined });
+        return qe.slice(args.name as string, {
+          file: args.file as string | undefined,
+          limit: args.limit as number | undefined,
+          ref_kinds: args.ref_kinds as string[] | undefined,
+        });
       case 'nexus_deps':
         return qe.deps(args.file as string, args.direction as 'imports' | 'importers' | undefined, args.depth as number | undefined);
       case 'nexus_stats':
@@ -497,6 +531,7 @@ export function createMcpServer(): Server {
           file: args.file as string | undefined,
           depth: args.depth as number | undefined,
           limit: args.limit as number | undefined,
+          ref_kinds: args.ref_kinds as string[] | undefined,
         });
       case 'nexus_pack':
         return qe.pack(args.query as string, {
@@ -518,6 +553,7 @@ export function createMcpServer(): Server {
         return qe.unusedExports({
           path: args.path as string | undefined,
           limit: args.limit as number | undefined,
+          mode: args.mode as 'default' | 'runtime_only' | undefined,
         });
       case 'nexus_kind_index':
         return qe.kindIndex(args.kind as string, {
