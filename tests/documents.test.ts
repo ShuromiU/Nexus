@@ -4,6 +4,8 @@ import { parseTsconfig } from '../src/analysis/documents/tsconfig.js';
 import { parseGenericJson } from '../src/analysis/documents/generic-json.js';
 import { parseGhaWorkflow } from '../src/analysis/documents/gha-workflow.js';
 import { parseGenericYaml } from '../src/analysis/documents/generic-yaml.js';
+import { parseCargoToml } from '../src/analysis/documents/cargo-toml.js';
+import { parseGenericToml } from '../src/analysis/documents/generic-toml.js';
 
 describe('parsePackageJson', () => {
   it('extracts name, version, deps, scripts', () => {
@@ -144,6 +146,58 @@ describe('parseGenericYaml', () => {
 
   it('returns { error } on malformed YAML', () => {
     const r = parseGenericYaml(': : : :');
+    expect(r && typeof r === 'object' && 'error' in (r as object)).toBe(true);
+  });
+});
+
+describe('parseCargoToml', () => {
+  it('extracts [package] and [dependencies]', () => {
+    const src = `
+[package]
+name = "my-crate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+criterion = "0.5"
+`;
+    const r = parseCargoToml(src);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.package?.name).toBe('my-crate');
+    expect(r.package?.version).toBe('0.1.0');
+    expect(r.package?.edition).toBe('2021');
+    expect(r.dependencies?.serde).toBe('1.0');
+    expect(r['dev-dependencies']?.criterion).toBe('0.5');
+  });
+
+  it('extracts [workspace].members', () => {
+    const src = `
+[workspace]
+members = ["crates/a", "crates/b"]
+`;
+    const r = parseCargoToml(src);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.workspace?.members).toEqual(['crates/a', 'crates/b']);
+  });
+
+  it('returns { error } on malformed TOML', () => {
+    const r = parseCargoToml('[[[[bad');
+    expect('error' in r).toBe(true);
+  });
+});
+
+describe('parseGenericToml', () => {
+  it('round-trips arbitrary structures', () => {
+    const r = parseGenericToml('title = "t"\n[table]\nkey = 1\n');
+    expect(r).toEqual({ title: 't', table: { key: 1 } });
+  });
+
+  it('returns { error } on malformed TOML', () => {
+    const r = parseGenericToml('[[[[bad');
     expect(r && typeof r === 'object' && 'error' in (r as object)).toBe(true);
   });
 });
