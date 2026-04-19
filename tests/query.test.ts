@@ -1381,58 +1381,72 @@ describe('slice ref_kinds filter', () => {
   let db3: Database.Database;
   let store3: NexusStore;
   let engine3: QueryEngine;
+  let tmp: string;
 
   beforeEach(() => {
     db3 = createTestDb();
     store3 = new NexusStore(db3);
-    // Need a source file on disk for slice to extract — use the existing
-    // test pattern from the existing slice tests (temp dir + root_path meta).
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-ref-kind-'));
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-ref-kind-'));
     fs.writeFileSync(
       path.join(tmp, 'main.ts'),
       'export function main() {\n  helper();\n  const x: Foo = { a: 1 };\n}\n',
     );
+    fs.writeFileSync(
+      path.join(tmp, 'helper.ts'),
+      'export function helper() {}\nexport interface Foo { a: number }\n',
+    );
     store3.setMeta('root_path', tmp);
+
     const f1 = store3.insertFile({
       path: 'main.ts', path_key: 'main.ts', hash: 'h', mtime: 1, size: 100,
       language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
     });
+    const f2 = store3.insertFile({
+      path: 'helper.ts', path_key: 'helper.ts', hash: 'h2', mtime: 2, size: 50,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+
     store3.insertSymbols([
       { file_id: f1, name: 'main', kind: 'function', line: 1, col: 16, end_line: 4 },
     ]);
-    // Simulate extracted occurrences in main()'s range:
+    store3.insertSymbols([
+      { file_id: f2, name: 'helper', kind: 'function', line: 1, col: 16, end_line: 1 },
+      { file_id: f2, name: 'Foo', kind: 'interface', line: 2, col: 17, end_line: 2 },
+    ]);
+
+    // Occurrences inside main()'s body range:
     store3.insertOccurrences([
       { file_id: f1, name: 'helper', line: 2, col: 2, confidence: 'heuristic', ref_kind: 'call' },
       { file_id: f1, name: 'Foo',    line: 3, col: 11, confidence: 'heuristic', ref_kind: 'type-ref' },
       { file_id: f1, name: 'x',      line: 3, col: 8,  confidence: 'heuristic', ref_kind: 'declaration' },
     ]);
-    // Seed referenced symbols in other files so slice can resolve them:
-    const f2 = store3.insertFile({
-      path: 'helper.ts', path_key: 'helper.ts', hash: 'h2', mtime: 2, size: 50,
-      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
-    });
-    fs.writeFileSync(path.join(tmp, 'helper.ts'), 'export function helper() {}\n');
-    store3.insertSymbols([
-      { file_id: f2, name: 'helper', kind: 'function', line: 1, col: 16, end_line: 1 },
-    ]);
+
     engine3 = new QueryEngine(db3);
   });
 
-  afterEach(() => db3.close());
-
-  it('default slice includes all referenced names', () => {
-    const result = engine3.slice('main');
-    const refNames = result.results[0]?.references.map(r => r.name).sort();
-    expect(refNames).toEqual(['helper']);
-    // Foo is filtered out here because no symbol named 'Foo' exists in the
-    // seed, not because of ref_kind. This test locks in default behaviour.
+  afterEach(() => {
+    db3.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('ref_kinds=["call"] filters to only called names', () => {
+  it('default slice includes both call and type-ref references', () => {
+    const result = engine3.slice('main');
+    const refNames = result.results[0]?.references.map(r => r.name).sort();
+    expect(refNames).toEqual(['Foo', 'helper']);
+  });
+
+  it('ref_kinds=["call"] excludes type-ref references', () => {
     const result = engine3.slice('main', { ref_kinds: ['call'] });
     const refNames = result.results[0]?.references.map(r => r.name);
     expect(refNames).toContain('helper');
     expect(refNames).not.toContain('Foo');
+  });
+
+  it('ref_kinds=["type-ref"] excludes call references', () => {
+    const result = engine3.slice('main', { ref_kinds: ['type-ref'] });
+    const refNames = result.results[0]?.references.map(r => r.name);
+    expect(refNames).toContain('Foo');
+    expect(refNames).not.toContain('helper');
   });
 });
 
