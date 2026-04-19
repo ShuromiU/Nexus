@@ -129,6 +129,17 @@ export function createMcpServer(): Server {
             type: 'object' as const,
             properties: {
               name: { type: 'string', description: 'Identifier name to search for' },
+              ref_kinds: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                  enum: ['call', 'read', 'write', 'type-ref', 'declaration'],
+                },
+                description:
+                  'Optional filter: restrict to occurrences with these ref_kinds. ' +
+                  'Only TypeScript/JavaScript files currently populate ref_kind — other ' +
+                  'languages return no results under this filter.',
+              },
               ...COMPACT_PROP,
             },
             required: ['name'],
@@ -495,7 +506,9 @@ export function createMcpServer(): Server {
       case 'nexus_find':
         return qe.find(args.name as string, args.kind as string | undefined);
       case 'nexus_refs':
-        return qe.occurrences(args.name as string);
+        return qe.occurrences(args.name as string, {
+          ref_kinds: args.ref_kinds as string[] | undefined,
+        });
       case 'nexus_exports':
         return qe.exports(args.file as string);
       case 'nexus_imports':

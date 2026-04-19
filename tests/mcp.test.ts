@@ -125,9 +125,18 @@ describe('MCP schemas surface new options', () => {
     expect(schema.properties).toHaveProperty('ref_kinds');
   });
 
+  it('nexus_refs schema includes ref_kinds', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_refs');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
+    expect(schema.properties).toHaveProperty('ref_kinds');
+  });
+
   it('nexus_unused_exports schema includes mode', async () => {
     const tools = await getRegisteredTools();
     const tool = tools.find(t => t.name === 'nexus_unused_exports');
+    expect(tool).toBeDefined();
     const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
     expect(schema.properties).toHaveProperty('mode');
   });
