@@ -5,6 +5,7 @@ import type Database from 'better-sqlite3';
 import { NexusStore } from '../db/store.js';
 import type { SymbolRow, FileRow, ModuleEdgeRow, SymbolWithFile, OccurrenceWithFile, ImportEdgeWithFile } from '../db/store.js';
 import { getAllAdapters } from '../analysis/languages/registry.js';
+import type { LanguageCapabilities } from '../analysis/languages/registry.js';
 import { extractSource } from '../analysis/extractor.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
@@ -114,16 +115,7 @@ export interface IndexStats {
   languages: Record<string, {
     files: number;
     symbols: number;
-    capabilities: {
-      definitions: true;
-      imports: boolean;
-      exports: boolean;
-      occurrences: boolean;
-      occurrenceQuality: 'exact' | 'heuristic';
-      typeExports: boolean;
-      docstrings: boolean;
-      signatures: boolean;
-    };
+    capabilities: LanguageCapabilities;
   }>;
   index_status: 'current' | 'stale' | 'reindexing';
   index_health: 'ok' | 'partial';
