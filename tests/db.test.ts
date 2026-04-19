@@ -753,3 +753,79 @@ describe('schema v2 ref_kind', () => {
     expect(row.ref_kind).toBeNull();
   });
 });
+
+describe('store ref_kind I/O', () => {
+  let db: Database.Database;
+  let store: NexusStore;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    applySchema(db);
+    initializeMeta(db, '/test', true);
+    store = new NexusStore(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('insertOccurrence persists ref_kind', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrence({
+      file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'exact', ref_kind: 'call',
+    });
+    const row = db.prepare('SELECT ref_kind FROM occurrences WHERE name = ?').get('foo') as { ref_kind: string };
+    expect(row.ref_kind).toBe('call');
+  });
+
+  it('insertOccurrences batch persists ref_kind per row', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrences([
+      { file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: fid, name: 'foo', line: 2, col: 0, confidence: 'exact', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'bar', line: 3, col: 0, confidence: 'exact' },
+    ]);
+    const rows = db.prepare('SELECT ref_kind FROM occurrences ORDER BY line').all() as { ref_kind: string | null }[];
+    expect(rows).toEqual([{ ref_kind: 'call' }, { ref_kind: 'type-ref' }, { ref_kind: null }]);
+  });
+
+  it('getOccurrencesByNameFiltered returns only matching kinds', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrences([
+      { file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: fid, name: 'foo', line: 2, col: 0, confidence: 'exact', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'foo', line: 3, col: 0, confidence: 'exact', ref_kind: null },
+    ]);
+    const calls = store.getOccurrencesByNameFiltered('foo', ['call']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].line).toBe(1);
+
+    const callOrType = store.getOccurrencesByNameFiltered('foo', ['call', 'type-ref']);
+    expect(callOrType.map(r => r.line).sort()).toEqual([1, 2]);
+
+    const noFilter = store.getOccurrencesByNameFiltered('foo', undefined);
+    expect(noFilter).toHaveLength(3); // includes NULL row
+  });
+
+  it('getOccurrencesInRangeFiltered filters by ref_kind', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrences([
+      { file_id: fid, name: 'a', line: 10, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: fid, name: 'b', line: 12, col: 0, confidence: 'exact', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'c', line: 14, col: 0, confidence: 'exact', ref_kind: 'read' },
+    ]);
+    const calls = store.getOccurrencesInRangeFiltered(fid, 1, 20, ['call']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe('a');
+  });
+});

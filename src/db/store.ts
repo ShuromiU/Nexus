@@ -512,8 +512,8 @@ export class NexusStore {
   insertOccurrence(occ: OccurrenceRow): number {
     const result = this.db
       .prepare(
-        `INSERT INTO occurrences (file_id, name, line, col, context, confidence)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO occurrences (file_id, name, line, col, context, confidence, ref_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         occ.file_id,
@@ -522,14 +522,15 @@ export class NexusStore {
         occ.col,
         occ.context ?? null,
         occ.confidence,
+        occ.ref_kind ?? null,
       );
     return Number(result.lastInsertRowid);
   }
 
   insertOccurrences(occs: OccurrenceRow[]): void {
     const stmt = this.db.prepare(
-      `INSERT INTO occurrences (file_id, name, line, col, context, confidence)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO occurrences (file_id, name, line, col, context, confidence, ref_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertMany = this.db.transaction((rows: OccurrenceRow[]) => {
       for (const o of rows) {
@@ -540,6 +541,7 @@ export class NexusStore {
           o.col,
           o.context ?? null,
           o.confidence,
+          o.ref_kind ?? null,
         );
       }
     });
@@ -572,6 +574,52 @@ export class NexusStore {
          ORDER BY line, col`,
       )
       .all(fileId, startLine, endLine) as (OccurrenceRow & { id: number })[];
+  }
+
+  /**
+   * Same as getOccurrencesByName, but narrows to rows whose ref_kind is in
+   * the given list. A NULL ref_kind never matches a filter — pass undefined
+   * to include all rows including legacy NULLs.
+   */
+  getOccurrencesByNameFiltered(
+    name: string,
+    refKinds: string[] | undefined,
+  ): (OccurrenceRow & { id: number })[] {
+    if (!refKinds || refKinds.length === 0) {
+      return this.getOccurrencesByName(name);
+    }
+    const placeholders = refKinds.map(() => '?').join(',');
+    return this.db
+      .prepare(
+        `SELECT * FROM occurrences
+         WHERE name = ? AND ref_kind IN (${placeholders})`,
+      )
+      .all(name, ...refKinds) as (OccurrenceRow & { id: number })[];
+  }
+
+  /**
+   * Same as getOccurrencesInRange, but narrows to rows whose ref_kind is in
+   * the given list. Pass undefined to include all rows.
+   */
+  getOccurrencesInRangeFiltered(
+    fileId: number,
+    startLine: number,
+    endLine: number,
+    refKinds: string[] | undefined,
+  ): (OccurrenceRow & { id: number })[] {
+    if (!refKinds || refKinds.length === 0) {
+      return this.getOccurrencesInRange(fileId, startLine, endLine);
+    }
+    const placeholders = refKinds.map(() => '?').join(',');
+    return this.db
+      .prepare(
+        `SELECT * FROM occurrences
+         WHERE file_id = ?
+           AND line BETWEEN ? AND ?
+           AND ref_kind IN (${placeholders})
+         ORDER BY line, col`,
+      )
+      .all(fileId, startLine, endLine, ...refKinds) as (OccurrenceRow & { id: number })[];
   }
 
   findSymbolsByNames(names: string[]): SymbolWithFile[] {
