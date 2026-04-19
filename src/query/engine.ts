@@ -691,6 +691,7 @@ export class QueryEngine {
           typeExports: false,
           docstrings: false,
           signatures: false,
+          refKinds: [],
         },
       };
     }

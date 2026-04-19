@@ -339,6 +339,28 @@ describe('Java adapter', () => {
   });
 });
 
+// ── LanguageCapabilities.refKinds ─────────────────────────────────────
+
+describe('LanguageCapabilities.refKinds', () => {
+  it('typescript and javascript declare refKinds', async () => {
+    await import('../src/analysis/languages/typescript.js');
+    const { getAdapter } = await import('../src/analysis/languages/registry.js');
+    const ts = getAdapter('typescript');
+    const js = getAdapter('javascript');
+    expect(ts?.capabilities.refKinds).toEqual(
+      expect.arrayContaining(['call', 'read', 'write', 'type-ref', 'declaration']),
+    );
+    expect(js?.capabilities.refKinds).toEqual(ts?.capabilities.refKinds);
+  });
+
+  it('python declares empty refKinds', async () => {
+    await import('../src/analysis/languages/python.js');
+    const { getAdapter } = await import('../src/analysis/languages/registry.js');
+    const py = getAdapter('python');
+    expect(py?.capabilities.refKinds).toEqual([]);
+  });
+});
+
 // ── C# ───────────────────────────────────────────────────────────────
 
 describe('C# adapter', () => {

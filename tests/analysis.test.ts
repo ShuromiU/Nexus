@@ -85,6 +85,7 @@ describe('registry', () => {
       typeExports: true,
       docstrings: true,
       signatures: true,
+      refKinds: ['call', 'read', 'write', 'type-ref', 'declaration'],
     });
   });
 

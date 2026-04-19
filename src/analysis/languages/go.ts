@@ -271,6 +271,7 @@ const goAdapter: LanguageAdapter = {
     typeExports: false,
     docstrings: true,
     signatures: true,
+    refKinds: [],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;

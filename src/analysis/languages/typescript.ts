@@ -929,6 +929,7 @@ const typescriptAdapter: LanguageAdapter = {
     typeExports: true,
     docstrings: true,
     signatures: true,
+    refKinds: ['call', 'read', 'write', 'type-ref', 'declaration'],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;

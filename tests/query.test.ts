@@ -615,6 +615,14 @@ describe('QueryEngine', () => {
       const stats = engine.stats().results[0];
       expect(stats.index_health).toBe('partial'); // has error file
     });
+
+    it('surfaces refKinds in per-language capabilities', () => {
+      const result = engine.stats();
+      const ts = result.results[0].languages['typescript'];
+      expect(ts?.capabilities.refKinds).toEqual(
+        expect.arrayContaining(['call', 'read', 'write', 'type-ref', 'declaration']),
+      );
+    });
   });
 
   // ── outline ────────────────────────────────────────────────────────
