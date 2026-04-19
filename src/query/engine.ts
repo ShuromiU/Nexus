@@ -1212,12 +1212,15 @@ export class QueryEngine {
    */
   callers(
     name: string,
-    opts?: { file?: string; depth?: number; limit?: number },
+    opts?: { file?: string; depth?: number; limit?: number; ref_kinds?: string[] },
   ): NexusResult<CallersResult> {
     const start = performance.now();
     const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 100);
     const depth = Math.min(Math.max(opts?.depth ?? 1, 1), 3);
-    const query = `callers ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.depth ? ` --depth ${opts.depth}` : ''}`;
+    const refKindSuffix = opts?.ref_kinds?.length
+      ? ` --ref-kinds ${opts.ref_kinds.join(',')}`
+      : '';
+    const query = `callers ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.depth ? ` --depth ${opts.depth}` : ''}${refKindSuffix}`;
 
     let defs = this.store.getSymbolsWithFile(name);
     if (defs.length === 0) {
@@ -1238,7 +1241,7 @@ export class QueryEngine {
 
     const result: CallersResult = {
       target: symbolWithFileToResult(target),
-      callers: this.findCallersForSymbol(target, depth, limit, new Set([target.id])),
+      callers: this.findCallersForSymbol(target, depth, limit, new Set([target.id]), opts?.ref_kinds),
     };
 
     if (defs.length > 1 && !opts?.file) {
@@ -1256,8 +1259,9 @@ export class QueryEngine {
     depth: number,
     limit: number,
     visited: Set<number>,
+    refKinds: string[] | undefined,
   ): CallerResult[] {
-    const occurrences = this.store.getOccurrencesByName(target.name);
+    const occurrences = this.store.getOccurrencesByNameFiltered(target.name, refKinds);
     const callerMap = new Map<number, { caller: SymbolWithFile; sites: CallerCallSite[] }>();
 
     for (const occ of occurrences) {
@@ -1311,7 +1315,7 @@ export class QueryEngine {
       if (depth > 1) {
         const nextVisited = new Set(visited);
         nextVisited.add(caller.id);
-        const recursed = this.findCallersForSymbol(caller, depth - 1, limit, nextVisited);
+        const recursed = this.findCallersForSymbol(caller, depth - 1, limit, nextVisited, refKinds);
         if (recursed.length > 0) entry.callers = recursed;
       }
       callers.push(entry);

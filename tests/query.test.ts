@@ -1255,6 +1255,56 @@ describe('QueryEngine.callers', () => {
   });
 });
 
+describe('callers ref_kinds filter', () => {
+  let db2: Database.Database;
+  let store2: NexusStore;
+  let engine2: QueryEngine;
+
+  beforeEach(() => {
+    db2 = createTestDb();
+    store2 = new NexusStore(db2);
+    // Seed: file with a function `parse` defined, and another file that
+    // uses `parse` as both a call and a type-ref.
+    const f1 = store2.insertFile({
+      path: 'src/parse.ts', path_key: 'src/parse.ts', hash: 'h1', mtime: 1, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    const f2 = store2.insertFile({
+      path: 'src/caller.ts', path_key: 'src/caller.ts', hash: 'h2', mtime: 2, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store2.insertSymbols([
+      { file_id: f1, name: 'parse', kind: 'function', line: 1, col: 0, end_line: 3, signature: '(s: string) => void' },
+      { file_id: f2, name: 'doWork', kind: 'function', line: 10, col: 0, end_line: 20 },
+    ]);
+    store2.insertOccurrences([
+      { file_id: f1, name: 'parse', line: 1, col: 9, confidence: 'heuristic', ref_kind: 'declaration' },
+      { file_id: f2, name: 'parse', line: 12, col: 4, confidence: 'heuristic', ref_kind: 'call' },
+      { file_id: f2, name: 'parse', line: 15, col: 20, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    engine2 = new QueryEngine(db2);
+  });
+
+  afterEach(() => db2.close());
+
+  it('default (no filter) returns all occurrences — includes type-ref', () => {
+    const result = engine2.callers('parse');
+    expect(result.results[0].callers[0].call_sites.length).toBe(2);
+  });
+
+  it('ref_kinds=["call"] returns only call sites', () => {
+    const result = engine2.callers('parse', { ref_kinds: ['call'] });
+    expect(result.results[0].callers[0].call_sites.length).toBe(1);
+    expect(result.results[0].callers[0].call_sites[0].line).toBe(12);
+  });
+
+  it('ref_kinds=["type-ref"] returns only type-ref sites', () => {
+    const result = engine2.callers('parse', { ref_kinds: ['type-ref'] });
+    expect(result.results[0].callers[0].call_sites.length).toBe(1);
+    expect(result.results[0].callers[0].call_sites[0].line).toBe(15);
+  });
+});
+
 describe('QueryEngine.unusedExports', () => {
   let db: Database.Database;
   let engine: QueryEngine;
