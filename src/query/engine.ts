@@ -1391,11 +1391,19 @@ export class QueryEngine {
    * Find exports with no importers and no occurrences outside their own file.
    * Best-effort dead-code finder. Note: re-exports through index.ts will
    * appear unused if nothing imports them externally; filter by path to scope.
+   *
+   * mode='runtime_only' excludes type-only importers (is_type=1) and
+   * type-ref occurrences (ref_kind='type-ref') from the "used" evidence,
+   * surfacing exports that are runtime-dead even if consumed in type positions.
    */
-  unusedExports(opts?: { path?: string; limit?: number }): NexusResult<UnusedExportResult> {
+  unusedExports(
+    opts?: { path?: string; limit?: number; mode?: 'default' | 'runtime_only' },
+  ): NexusResult<UnusedExportResult> {
     const start = performance.now();
     const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
-    const query = `unused_exports${opts?.path ? ` --path ${opts.path}` : ''}`;
+    const mode = opts?.mode ?? 'default';
+    const modeSuffix = mode === 'runtime_only' ? ' --mode runtime_only' : '';
+    const query = `unused_exports${opts?.path ? ` --path ${opts.path}` : ''}${modeSuffix}`;
 
     const exports = this.store.getAllExports(opts?.path);
     const results: UnusedExportResult[] = [];
@@ -1407,16 +1415,23 @@ export class QueryEngine {
 
       // Check if any other file imports this file (resolved_file_id match)
       const importers = this.store.getImportersByResolvedFileId(exp.file_id);
-      const namedImporters = importers.filter(imp =>
-        imp.is_star || imp.is_default
-          ? false
-          : imp.name === exp.name || imp.alias === exp.name,
-      );
+      const namedImporters = importers.filter(imp => {
+        if (imp.is_star || imp.is_default) return false;
+        if (imp.name !== exp.name && imp.alias !== exp.name) return false;
+        // In runtime_only mode, a type-only import (is_type=1) does not count
+        // as a "use".
+        if (mode === 'runtime_only' && imp.is_type) return false;
+        return true;
+      });
       if (namedImporters.length > 0) continue;
 
       // Check occurrences in OTHER files
-      const occurrences = this.store.getOccurrencesByName(exp.name);
-      const externalOccurrences = occurrences.filter(o => o.file_id !== exp.file_id);
+      let externalOccurrences = this.store
+        .getOccurrencesByName(exp.name)
+        .filter(o => o.file_id !== exp.file_id);
+      if (mode === 'runtime_only') {
+        externalOccurrences = externalOccurrences.filter(o => o.ref_kind !== 'type-ref');
+      }
       if (externalOccurrences.length > 0) continue;
 
       // Look up kind via local symbol if available

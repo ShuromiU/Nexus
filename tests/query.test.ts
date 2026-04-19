@@ -1540,3 +1540,54 @@ describe('occurrences ref_kinds filter', () => {
     expect(result.results[0].line).toBe(1);
   });
 });
+
+describe('unusedExports mode', () => {
+  let dbu: Database.Database;
+  let storeu: NexusStore;
+  let engineu: QueryEngine;
+
+  beforeEach(() => {
+    dbu = createTestDb();
+    storeu = new NexusStore(dbu);
+    // File 1 exports `PublicType`. File 2 imports it as a type only.
+    const f1 = storeu.insertFile({
+      path: 'lib.ts', path_key: 'lib.ts', hash: 'h1', mtime: 1, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    const f2 = storeu.insertFile({
+      path: 'user.ts', path_key: 'user.ts', hash: 'h2', mtime: 2, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    storeu.insertSymbols([
+      { file_id: f1, name: 'PublicType', kind: 'type', line: 1, col: 0 },
+    ]);
+    storeu.insertModuleEdges([
+      { file_id: f1, kind: 'export', name: 'PublicType', line: 1, is_default: false, is_star: false, is_type: true },
+      // type-only import in user.ts
+      { file_id: f2, kind: 'import', name: 'PublicType', source: './lib', line: 1,
+        is_default: false, is_star: false, is_type: true },
+    ]);
+    // Resolve the import so the store sees it as a real importer.
+    const edges = storeu.getImportsByFileId(f2);
+    storeu.resolveEdge(edges[0].id, f1);
+    // Record a type-ref occurrence in user.ts (the only external use).
+    storeu.insertOccurrences([
+      { file_id: f2, name: 'PublicType', line: 5, col: 10, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    engineu = new QueryEngine(dbu);
+  });
+
+  afterEach(() => dbu.close());
+
+  it('default mode does NOT flag a type-only-used export as unused', () => {
+    const result = engineu.unusedExports();
+    const names = result.results.map(r => r.name);
+    expect(names).not.toContain('PublicType');
+  });
+
+  it('mode=runtime_only flags a type-only-used export as unused', () => {
+    const result = engineu.unusedExports({ mode: 'runtime_only' });
+    const names = result.results.map(r => r.name);
+    expect(names).toContain('PublicType');
+  });
+});
