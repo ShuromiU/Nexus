@@ -31,6 +31,17 @@ import './analysis/languages/rust.js';
 import './analysis/languages/java.js';
 import './analysis/languages/csharp.js';
 
+// Document parsers (structured config / lockfile helpers — consumed by A3)
+export {
+  parsePackageJson, parseTsconfig, parseGenericJson,
+  parseGhaWorkflow, parseGenericYaml,
+  parseCargoToml, parseGenericToml,
+  parseYarnLock,
+} from './analysis/documents/index.js';
+export type {
+  ParsedPackageJson, ParsedTsconfig, ParsedGhaWorkflow, ParsedCargoToml, ParsedYarnLock,
+} from './analysis/documents/index.js';
+
 // Index orchestrator
 export { runIndex } from './index/orchestrator.js';
 export type { IndexResult } from './index/orchestrator.js';
