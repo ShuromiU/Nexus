@@ -8,7 +8,7 @@ import { loadConfig, computeConfigHash } from '../config.js';
 import type { NexusConfig } from '../config.js';
 import { detectRoot, detectCaseSensitivity, getGitHead } from '../workspace/detector.js';
 import { buildIgnoreMatcher } from '../workspace/ignores.js';
-import { scanDirectory, buildExtraExtensions } from '../workspace/scanner.js';
+import { scanDirectory } from '../workspace/scanner.js';
 import { detectChanges, summarizeChanges, readAndHash } from '../workspace/changes.js';
 import type { FileChange } from '../workspace/changes.js';
 import { extractFile, extractSource } from '../analysis/extractor.js';
@@ -85,11 +85,10 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
 
     // ── Phase 1: Scan + Parse (no write lock) ───────────────────────
     const isIgnored = buildIgnoreMatcher(rootDir, config.exclude);
-    const extraExt = buildExtraExtensions(config.languages);
     const scannedFiles = scanDirectory(rootDir, isIgnored, {
       maxFileSize: config.maxFileSize,
       minifiedLineLength: config.minifiedLineLength,
-      extraExtensions: extraExt,
+      languages: config.languages,
     });
 
     const dbFiles = mode === 'full' ? [] : store.getAllFiles();
