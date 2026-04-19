@@ -1591,3 +1591,48 @@ describe('unusedExports mode', () => {
     expect(names).toContain('PublicType');
   });
 });
+
+describe('ref_kind precision — same-name collision (integration)', () => {
+  let dbc: Database.Database;
+  let storec: NexusStore;
+  let enginec: QueryEngine;
+
+  beforeEach(() => {
+    dbc = createTestDb();
+    storec = new NexusStore(dbc);
+    // File with both a function `parse` and a type alias `parse`
+    // (in real TS you couldn't, but occurrences don't care — callers
+    // using the function vs the type would produce different ref_kinds
+    // in source, so a callers({ref_kinds:['call']}) result must exclude
+    // the type-ref row).
+    const f = storec.insertFile({
+      path: 'src/parse.ts', path_key: 'src/parse.ts', hash: 'h',
+      mtime: 1, size: 100, language: 'typescript', status: 'indexed',
+      indexed_at: '2026-04-19T00:00:00Z',
+    });
+    storec.insertSymbols([
+      { file_id: f, name: 'parse', kind: 'function', line: 1, col: 17, end_line: 3 },
+      { file_id: f, name: 'parseTypeAlias', kind: 'function', line: 10, col: 0, end_line: 14 },
+    ]);
+    storec.insertOccurrences([
+      { file_id: f, name: 'parse', line: 1, col: 17, confidence: 'heuristic', ref_kind: 'declaration' },
+      { file_id: f, name: 'parse', line: 11, col: 4, confidence: 'heuristic', ref_kind: 'call' },
+      { file_id: f, name: 'parse', line: 12, col: 20, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    enginec = new QueryEngine(dbc);
+  });
+
+  afterEach(() => dbc.close());
+
+  it('callers default — 2 sites (declaration already excluded)', () => {
+    const result = enginec.callers('parse');
+    expect(result.results[0].callers[0].call_sites.length).toBe(2);
+  });
+
+  it('callers ref_kinds=["call"] — only the call site', () => {
+    const result = enginec.callers('parse', { ref_kinds: ['call'] });
+    const sites = result.results[0].callers[0].call_sites;
+    expect(sites.length).toBe(1);
+    expect(sites[0].line).toBe(11);
+  });
+});
