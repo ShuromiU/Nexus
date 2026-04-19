@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { parsePackageJson } from '../src/analysis/documents/package-json.js';
 import { parseTsconfig } from '../src/analysis/documents/tsconfig.js';
 import { parseGenericJson } from '../src/analysis/documents/generic-json.js';
+import { parseGhaWorkflow } from '../src/analysis/documents/gha-workflow.js';
+import { parseGenericYaml } from '../src/analysis/documents/generic-yaml.js';
 
 describe('parsePackageJson', () => {
   it('extracts name, version, deps, scripts', () => {
@@ -97,5 +99,51 @@ describe('parseGenericJson', () => {
   it('returns { error } on malformed input', () => {
     const r = parseGenericJson('{ not json');
     expect(r && typeof r === 'object' && 'error' in r).toBe(true);
+  });
+});
+
+describe('parseGhaWorkflow', () => {
+  it('extracts name, jobs, and steps', () => {
+    const src = `
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build
+        run: npm run build
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+`;
+    const r = parseGhaWorkflow(src);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.name).toBe('CI');
+    expect(r.jobs?.test?.['runs-on']).toBe('ubuntu-latest');
+    expect(r.jobs?.test?.steps).toHaveLength(2);
+    expect(r.jobs?.test?.steps?.[0].uses).toBe('actions/checkout@v4');
+    expect(r.jobs?.lint?.steps?.[0].run).toBe('npm run lint');
+  });
+
+  it('returns { error } on malformed YAML', () => {
+    // Block mapping with inconsistent indentation that the yaml lib rejects.
+    const r = parseGhaWorkflow('a: 1\n b: 2\n  c: 3\n\t- not yaml');
+    expect('error' in r).toBe(true);
+  });
+});
+
+describe('parseGenericYaml', () => {
+  it('round-trips nested structures', () => {
+    const r = parseGenericYaml('a:\n  - 1\n  - 2\nb:\n  c: x\n');
+    expect(r).toEqual({ a: [1, 2], b: { c: 'x' } });
+  });
+
+  it('returns { error } on malformed YAML', () => {
+    const r = parseGenericYaml(': : : :');
+    expect(r && typeof r === 'object' && 'error' in (r as object)).toBe(true);
   });
 });
