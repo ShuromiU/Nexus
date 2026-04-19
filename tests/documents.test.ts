@@ -6,6 +6,7 @@ import { parseGhaWorkflow } from '../src/analysis/documents/gha-workflow.js';
 import { parseGenericYaml } from '../src/analysis/documents/generic-yaml.js';
 import { parseCargoToml } from '../src/analysis/documents/cargo-toml.js';
 import { parseGenericToml } from '../src/analysis/documents/generic-toml.js';
+import { parseYarnLock } from '../src/analysis/documents/yarn-lock.js';
 
 describe('parsePackageJson', () => {
   it('extracts name, version, deps, scripts', () => {
@@ -199,5 +200,41 @@ describe('parseGenericToml', () => {
   it('returns { error } on malformed TOML', () => {
     const r = parseGenericToml('[[[[bad');
     expect(r && typeof r === 'object' && 'error' in (r as object)).toBe(true);
+  });
+});
+
+describe('parseYarnLock', () => {
+  it('extracts name + version from yarn v1 entries', () => {
+    const src = `# yarn lockfile v1
+
+"react@^18.0.0":
+  version "18.2.0"
+  resolved "https://registry.yarnpkg.com/react/-/react-18.2.0.tgz"
+
+"lodash@^4.17.0", "lodash@^4.17.21":
+  version "4.17.21"
+  resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz"
+`;
+    const r = parseYarnLock(src);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.entries).toContainEqual({ name: 'react', version: '18.2.0' });
+    expect(r.entries).toContainEqual({ name: 'lodash', version: '4.17.21' });
+    expect(r.entries).toHaveLength(2);
+  });
+
+  it('handles scoped packages', () => {
+    const src = `
+"@types/node@^20.0.0":
+  version "20.10.5"
+`;
+    const r = parseYarnLock(src);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.entries).toContainEqual({ name: '@types/node', version: '20.10.5' });
+  });
+
+  it('returns empty entries for an empty lockfile', () => {
+    const r = parseYarnLock('# yarn lockfile v1\n');
+    if ('error' in r) throw new Error(r.error);
+    expect(r.entries).toEqual([]);
   });
 });
