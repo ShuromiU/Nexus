@@ -310,6 +310,23 @@ export class NexusStore {
       .all(name) as OccurrenceWithFile[];
   }
 
+  getOccurrencesWithFileFiltered(
+    name: string,
+    refKinds: string[] | undefined,
+  ): OccurrenceWithFile[] {
+    if (!refKinds || refKinds.length === 0) {
+      return this.getOccurrencesWithFile(name);
+    }
+    const placeholders = refKinds.map(() => '?').join(',');
+    return this.db
+      .prepare(
+        `SELECT o.*, f.path AS file_path
+         FROM occurrences o JOIN files f ON o.file_id = f.id
+         WHERE o.name = ? AND o.ref_kind IN (${placeholders})`,
+      )
+      .all(name, ...refKinds) as OccurrenceWithFile[];
+  }
+
   getImportEdgesWithFile(source: string): ImportEdgeWithFile[] {
     return this.db
       .prepare(

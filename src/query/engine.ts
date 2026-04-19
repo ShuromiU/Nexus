@@ -351,10 +351,17 @@ export class QueryEngine {
   /**
    * Find all occurrences of an identifier (aliased as `refs`).
    */
-  occurrences(name: string): NexusResult<OccurrenceResult> {
+  occurrences(
+    name: string,
+    opts?: { ref_kinds?: string[] },
+  ): NexusResult<OccurrenceResult> {
     const start = performance.now();
 
-    const rows = this.store.getOccurrencesWithFile(name);
+    const rows = this.store.getOccurrencesWithFileFiltered(name, opts?.ref_kinds);
+
+    const refKindSuffix = opts?.ref_kinds?.length
+      ? ` --ref-kinds ${opts.ref_kinds.join(',')}`
+      : '';
 
     const results: OccurrenceResult[] = rows.map(row => ({
       name: row.name,
@@ -365,7 +372,7 @@ export class QueryEngine {
       confidence: row.confidence as 'exact' | 'heuristic',
     }));
 
-    return this.wrap('occurrences', `refs ${name}`, results, start);
+    return this.wrap('occurrences', `refs ${name}${refKindSuffix}`, results, start);
   }
 
   /**

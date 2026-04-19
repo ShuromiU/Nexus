@@ -1506,3 +1506,37 @@ describe('compactify', () => {
     expect(compact.r[0].id).toBeUndefined(); // is_default: false dropped
   });
 });
+
+describe('occurrences ref_kinds filter', () => {
+  let dbo: Database.Database;
+  let storeo: NexusStore;
+  let engineo: QueryEngine;
+
+  beforeEach(() => {
+    dbo = createTestDb();
+    storeo = new NexusStore(dbo);
+    const fid = storeo.insertFile({
+      path: 'x.ts', path_key: 'x.ts', hash: 'h', mtime: 1, size: 10,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    storeo.insertOccurrences([
+      { file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'heuristic', ref_kind: 'call' },
+      { file_id: fid, name: 'foo', line: 2, col: 0, confidence: 'heuristic', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'foo', line: 3, col: 0, confidence: 'heuristic', ref_kind: null },
+    ]);
+    engineo = new QueryEngine(dbo);
+  });
+
+  afterEach(() => dbo.close());
+
+  it('default returns all occurrences including NULL ref_kind', () => {
+    const result = engineo.occurrences('foo');
+    expect(result.count).toBe(3);
+  });
+
+  it('ref_kinds filter excludes NULL rows', () => {
+    const result = engineo.occurrences('foo', { ref_kinds: ['call'] });
+    expect(result.count).toBe(1);
+    expect(result.results[0].line).toBe(1);
+  });
+});
