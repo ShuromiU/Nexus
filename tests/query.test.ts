@@ -615,6 +615,14 @@ describe('QueryEngine', () => {
       const stats = engine.stats().results[0];
       expect(stats.index_health).toBe('partial'); // has error file
     });
+
+    it('surfaces refKinds in per-language capabilities', () => {
+      const result = engine.stats();
+      const ts = result.results[0].languages['typescript'];
+      expect(ts?.capabilities.refKinds).toEqual(
+        expect.arrayContaining(['call', 'read', 'write', 'type-ref', 'declaration']),
+      );
+    });
   });
 
   // ── outline ────────────────────────────────────────────────────────
@@ -1247,6 +1255,107 @@ describe('QueryEngine.callers', () => {
   });
 });
 
+describe('callers ref_kinds filter', () => {
+  let db2: Database.Database;
+  let store2: NexusStore;
+  let engine2: QueryEngine;
+
+  beforeEach(() => {
+    db2 = createTestDb();
+    store2 = new NexusStore(db2);
+    // Seed: file with a function `parse` defined, and another file that
+    // uses `parse` as both a call and a type-ref.
+    const f1 = store2.insertFile({
+      path: 'src/parse.ts', path_key: 'src/parse.ts', hash: 'h1', mtime: 1, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    const f2 = store2.insertFile({
+      path: 'src/caller.ts', path_key: 'src/caller.ts', hash: 'h2', mtime: 2, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store2.insertSymbols([
+      { file_id: f1, name: 'parse', kind: 'function', line: 1, col: 0, end_line: 3, signature: '(s: string) => void' },
+      { file_id: f2, name: 'doWork', kind: 'function', line: 10, col: 0, end_line: 20 },
+    ]);
+    store2.insertOccurrences([
+      { file_id: f1, name: 'parse', line: 1, col: 9, confidence: 'heuristic', ref_kind: 'declaration' },
+      { file_id: f2, name: 'parse', line: 12, col: 4, confidence: 'heuristic', ref_kind: 'call' },
+      { file_id: f2, name: 'parse', line: 15, col: 20, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    engine2 = new QueryEngine(db2);
+  });
+
+  afterEach(() => db2.close());
+
+  it('default (no filter) returns all occurrences — includes type-ref', () => {
+    const result = engine2.callers('parse');
+    expect(result.results[0].callers[0].call_sites.length).toBe(2);
+  });
+
+  it('ref_kinds=["call"] returns only call sites', () => {
+    const result = engine2.callers('parse', { ref_kinds: ['call'] });
+    expect(result.results[0].callers[0].call_sites.length).toBe(1);
+    expect(result.results[0].callers[0].call_sites[0].line).toBe(12);
+  });
+
+  it('ref_kinds=["type-ref"] returns only type-ref sites', () => {
+    const result = engine2.callers('parse', { ref_kinds: ['type-ref'] });
+    expect(result.results[0].callers[0].call_sites.length).toBe(1);
+    expect(result.results[0].callers[0].call_sites[0].line).toBe(15);
+  });
+
+  it('call_sites include ref_kind field', () => {
+    const result = engine2.callers('parse', { ref_kinds: ['call'] });
+    const site = result.results[0].callers[0].call_sites[0];
+    expect(site.ref_kind).toBe('call');
+  });
+});
+
+describe('occurrences ref_kind projection', () => {
+  let db3: Database.Database;
+  let store3: NexusStore;
+  let engine3: QueryEngine;
+
+  beforeEach(() => {
+    db3 = new Database(':memory:');
+    db3.pragma('journal_mode = WAL');
+    db3.pragma('foreign_keys = ON');
+    applySchema(db3);
+    store3 = new NexusStore(db3);
+    initializeMeta(db3, '/test', true);
+
+    const f = store3.insertFile({
+      path: 'src/app.ts', path_key: 'src/app.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store3.insertOccurrences([
+      { file_id: f, name: 'render', line: 5, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: f, name: 'render', line: 10, col: 0, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    store3.setMeta('last_indexed_at', '2026-04-19T00:00:00Z');
+    engine3 = new QueryEngine(db3);
+  });
+
+  afterEach(() => db3.close());
+
+  it('projects ref_kind onto OccurrenceResult', () => {
+    const result = engine3.occurrences('render');
+    expect(result.count).toBe(2);
+    const callSite = result.results.find(r => r.line === 5);
+    expect(callSite).toBeDefined();
+    expect(callSite!.ref_kind).toBe('call');
+    const typeRef = result.results.find(r => r.line === 10);
+    expect(typeRef).toBeDefined();
+    expect(typeRef!.ref_kind).toBe('type-ref');
+  });
+
+  it('filtered occurrences still include ref_kind', () => {
+    const result = engine3.occurrences('render', { ref_kinds: ['call'] });
+    expect(result.count).toBe(1);
+    expect(result.results[0].ref_kind).toBe('call');
+  });
+});
+
 describe('QueryEngine.unusedExports', () => {
   let db: Database.Database;
   let engine: QueryEngine;
@@ -1319,6 +1428,79 @@ describe('QueryEngine.definitionAt', () => {
   });
 });
 
+describe('slice ref_kinds filter', () => {
+  let db3: Database.Database;
+  let store3: NexusStore;
+  let engine3: QueryEngine;
+  let tmp: string;
+
+  beforeEach(() => {
+    db3 = createTestDb();
+    store3 = new NexusStore(db3);
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-ref-kind-'));
+    fs.writeFileSync(
+      path.join(tmp, 'main.ts'),
+      'export function main() {\n  helper();\n  const x: Foo = { a: 1 };\n}\n',
+    );
+    fs.writeFileSync(
+      path.join(tmp, 'helper.ts'),
+      'export function helper() {}\nexport interface Foo { a: number }\n',
+    );
+    store3.setMeta('root_path', tmp);
+
+    const f1 = store3.insertFile({
+      path: 'main.ts', path_key: 'main.ts', hash: 'h', mtime: 1, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    const f2 = store3.insertFile({
+      path: 'helper.ts', path_key: 'helper.ts', hash: 'h2', mtime: 2, size: 50,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+
+    store3.insertSymbols([
+      { file_id: f1, name: 'main', kind: 'function', line: 1, col: 16, end_line: 4 },
+    ]);
+    store3.insertSymbols([
+      { file_id: f2, name: 'helper', kind: 'function', line: 1, col: 16, end_line: 1 },
+      { file_id: f2, name: 'Foo', kind: 'interface', line: 2, col: 17, end_line: 2 },
+    ]);
+
+    // Occurrences inside main()'s body range:
+    store3.insertOccurrences([
+      { file_id: f1, name: 'helper', line: 2, col: 2, confidence: 'heuristic', ref_kind: 'call' },
+      { file_id: f1, name: 'Foo',    line: 3, col: 11, confidence: 'heuristic', ref_kind: 'type-ref' },
+      { file_id: f1, name: 'x',      line: 3, col: 8,  confidence: 'heuristic', ref_kind: 'declaration' },
+    ]);
+
+    engine3 = new QueryEngine(db3);
+  });
+
+  afterEach(() => {
+    db3.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('default slice includes both call and type-ref references', () => {
+    const result = engine3.slice('main');
+    const refNames = result.results[0]?.references.map(r => r.name).sort();
+    expect(refNames).toEqual(['Foo', 'helper']);
+  });
+
+  it('ref_kinds=["call"] excludes type-ref references', () => {
+    const result = engine3.slice('main', { ref_kinds: ['call'] });
+    const refNames = result.results[0]?.references.map(r => r.name);
+    expect(refNames).toContain('helper');
+    expect(refNames).not.toContain('Foo');
+  });
+
+  it('ref_kinds=["type-ref"] excludes call references', () => {
+    const result = engine3.slice('main', { ref_kinds: ['type-ref'] });
+    const refNames = result.results[0]?.references.map(r => r.name);
+    expect(refNames).toContain('Foo');
+    expect(refNames).not.toContain('helper');
+  });
+});
+
 describe('compactify', () => {
   it('drops envelope chrome and renames keys', async () => {
     const { compactify } = await import('../src/query/compact.js');
@@ -1373,5 +1555,135 @@ describe('compactify', () => {
     const compact = compactify(verbose) as { r: Record<string, unknown>[] };
     expect(compact.r[0].s).toBeUndefined(); // signature: '' dropped
     expect(compact.r[0].id).toBeUndefined(); // is_default: false dropped
+  });
+});
+
+describe('occurrences ref_kinds filter', () => {
+  let dbo: Database.Database;
+  let storeo: NexusStore;
+  let engineo: QueryEngine;
+
+  beforeEach(() => {
+    dbo = createTestDb();
+    storeo = new NexusStore(dbo);
+    const fid = storeo.insertFile({
+      path: 'x.ts', path_key: 'x.ts', hash: 'h', mtime: 1, size: 10,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    storeo.insertOccurrences([
+      { file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'heuristic', ref_kind: 'call' },
+      { file_id: fid, name: 'foo', line: 2, col: 0, confidence: 'heuristic', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'foo', line: 3, col: 0, confidence: 'heuristic', ref_kind: null },
+    ]);
+    engineo = new QueryEngine(dbo);
+  });
+
+  afterEach(() => dbo.close());
+
+  it('default returns all occurrences including NULL ref_kind', () => {
+    const result = engineo.occurrences('foo');
+    expect(result.count).toBe(3);
+  });
+
+  it('ref_kinds filter excludes NULL rows', () => {
+    const result = engineo.occurrences('foo', { ref_kinds: ['call'] });
+    expect(result.count).toBe(1);
+    expect(result.results[0].line).toBe(1);
+  });
+});
+
+describe('unusedExports mode', () => {
+  let dbu: Database.Database;
+  let storeu: NexusStore;
+  let engineu: QueryEngine;
+
+  beforeEach(() => {
+    dbu = createTestDb();
+    storeu = new NexusStore(dbu);
+    // File 1 exports `PublicType`. File 2 imports it as a type only.
+    const f1 = storeu.insertFile({
+      path: 'lib.ts', path_key: 'lib.ts', hash: 'h1', mtime: 1, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    const f2 = storeu.insertFile({
+      path: 'user.ts', path_key: 'user.ts', hash: 'h2', mtime: 2, size: 100,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    storeu.insertSymbols([
+      { file_id: f1, name: 'PublicType', kind: 'type', line: 1, col: 0 },
+    ]);
+    storeu.insertModuleEdges([
+      { file_id: f1, kind: 'export', name: 'PublicType', line: 1, is_default: false, is_star: false, is_type: true },
+      // type-only import in user.ts
+      { file_id: f2, kind: 'import', name: 'PublicType', source: './lib', line: 1,
+        is_default: false, is_star: false, is_type: true },
+    ]);
+    // Resolve the import so the store sees it as a real importer.
+    const edges = storeu.getImportsByFileId(f2);
+    storeu.resolveEdge(edges[0].id, f1);
+    // Record a type-ref occurrence in user.ts (the only external use).
+    storeu.insertOccurrences([
+      { file_id: f2, name: 'PublicType', line: 5, col: 10, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    engineu = new QueryEngine(dbu);
+  });
+
+  afterEach(() => dbu.close());
+
+  it('default mode does NOT flag a type-only-used export as unused', () => {
+    const result = engineu.unusedExports();
+    const names = result.results.map(r => r.name);
+    expect(names).not.toContain('PublicType');
+  });
+
+  it('mode=runtime_only flags a type-only-used export as unused', () => {
+    const result = engineu.unusedExports({ mode: 'runtime_only' });
+    const names = result.results.map(r => r.name);
+    expect(names).toContain('PublicType');
+  });
+});
+
+describe('ref_kind precision — same-name collision (integration)', () => {
+  let dbc: Database.Database;
+  let storec: NexusStore;
+  let enginec: QueryEngine;
+
+  beforeEach(() => {
+    dbc = createTestDb();
+    storec = new NexusStore(dbc);
+    // File with both a function `parse` and a type alias `parse`
+    // (in real TS you couldn't, but occurrences don't care — callers
+    // using the function vs the type would produce different ref_kinds
+    // in source, so a callers({ref_kinds:['call']}) result must exclude
+    // the type-ref row).
+    const f = storec.insertFile({
+      path: 'src/parse.ts', path_key: 'src/parse.ts', hash: 'h',
+      mtime: 1, size: 100, language: 'typescript', status: 'indexed',
+      indexed_at: '2026-04-19T00:00:00Z',
+    });
+    storec.insertSymbols([
+      { file_id: f, name: 'parse', kind: 'function', line: 1, col: 17, end_line: 3 },
+      { file_id: f, name: 'parseTypeAlias', kind: 'function', line: 10, col: 0, end_line: 14 },
+    ]);
+    storec.insertOccurrences([
+      { file_id: f, name: 'parse', line: 1, col: 17, confidence: 'heuristic', ref_kind: 'declaration' },
+      { file_id: f, name: 'parse', line: 11, col: 4, confidence: 'heuristic', ref_kind: 'call' },
+      { file_id: f, name: 'parse', line: 12, col: 20, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    enginec = new QueryEngine(dbc);
+  });
+
+  afterEach(() => dbc.close());
+
+  it('callers default — 2 sites (declaration already excluded)', () => {
+    const result = enginec.callers('parse');
+    expect(result.results[0].callers[0].call_sites.length).toBe(2);
+  });
+
+  it('callers ref_kinds=["call"] — only the call site', () => {
+    const result = enginec.callers('parse', { ref_kinds: ['call'] });
+    const sites = result.results[0].callers[0].call_sites;
+    expect(sites.length).toBe(1);
+    expect(sites[0].line).toBe(11);
   });
 });

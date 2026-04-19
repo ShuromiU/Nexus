@@ -387,11 +387,14 @@ export function createProgram(): Command {
   program
     .command('refs <name>')
     .description('Find all occurrences of an identifier')
-    .action((name: string) => {
+    .option('--ref-kinds <kinds>', 'comma-separated: call,read,write,type-ref,declaration')
+    .action((name: string, opts: { refKinds?: string }) => {
       const { db } = openQueryDb(process.cwd());
       try {
         const engine = new QueryEngine(db);
-        const result = engine.occurrences(name);
+        const result = engine.occurrences(name, {
+          ref_kinds: opts.refKinds?.split(',').map(s => s.trim()),
+        });
         printEnvelope(result, formatOccurrences(result.results));
       } finally {
         db.close();
@@ -567,12 +570,17 @@ export function createProgram(): Command {
     .description('Extract a symbol and the named symbols it references')
     .option('-f, --file <file>', 'Narrow to a specific file')
     .option('-l, --limit <n>', 'Max referenced symbols', '20')
-    .action((name: string, opts: { file?: string; limit: string }) => {
+    .option('--ref-kinds <kinds>', 'comma-separated: call,read,write,type-ref,declaration')
+    .action((name: string, opts: { file?: string; limit: string; refKinds?: string }) => {
       const { db } = openQueryDb(process.cwd());
       try {
         const engine = new QueryEngine(db);
         const limit = parseInt(opts.limit, 10) || 20;
-        const result = engine.slice(name, { file: opts.file, limit });
+        const result = engine.slice(name, {
+          file: opts.file,
+          limit,
+          ref_kinds: opts.refKinds?.split(',').map(s => s.trim()),
+        });
         if (result.results.length > 0) {
           printEnvelope(result, formatSlice(result.results[0]));
         } else {
@@ -662,8 +670,9 @@ export function createProgram(): Command {
     .option('-f, --file <file>', 'Disambiguate when name is multi-defined')
     .option('-d, --depth <n>', 'Recursion depth, 1-3', '1')
     .option('-l, --limit <n>', 'Max callers per level', '30')
+    .option('--ref-kinds <kinds>', 'comma-separated: call,read,write,type-ref,declaration')
     .option('--pretty', 'Pretty-print JSON')
-    .action((name: string, opts: { file?: string; depth: string; limit: string; pretty?: boolean }) => {
+    .action((name: string, opts: { file?: string; depth: string; limit: string; refKinds?: string; pretty?: boolean }) => {
       const { db } = openQueryDb(process.cwd());
       try {
         const engine = new QueryEngine(db);
@@ -671,6 +680,7 @@ export function createProgram(): Command {
           file: opts.file,
           depth: parseInt(opts.depth, 10) || 1,
           limit: parseInt(opts.limit, 10) || 30,
+          ref_kinds: opts.refKinds?.split(',').map(s => s.trim()),
         });
         printJson(result, !!opts.pretty);
       } finally {
@@ -766,14 +776,16 @@ export function createProgram(): Command {
     .description('Find exports with no importers and no external occurrences')
     .option('-p, --path <prefix>', 'Path prefix to scope (e.g. "src/")')
     .option('-l, --limit <n>', 'Max results', '100')
+    .option('--mode <mode>', 'default|runtime_only', 'default')
     .option('--pretty', 'Pretty-print JSON')
-    .action((opts: { path?: string; limit: string; pretty?: boolean }) => {
+    .action((opts: { path?: string; limit: string; mode?: string; pretty?: boolean }) => {
       const { db } = openQueryDb(process.cwd());
       try {
         const engine = new QueryEngine(db);
         const result = engine.unusedExports({
           path: opts.path,
           limit: parseInt(opts.limit, 10) || 100,
+          mode: opts.mode === 'runtime_only' ? 'runtime_only' : 'default',
         });
         printJson(result, !!opts.pretty);
       } finally {

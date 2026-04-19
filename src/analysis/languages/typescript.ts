@@ -2,6 +2,7 @@ import type Parser from 'tree-sitter';
 import type { LanguageAdapter, ExtractionResult } from './registry.js';
 import { registerAdapter } from './registry.js';
 import type { SymbolRow, ModuleEdgeRow, OccurrenceRow } from '../../db/store.js';
+import { getParser as getParserForTest } from '../parser.js';
 
 type SymbolOut = Omit<SymbolRow, 'id' | 'file_id'>;
 type EdgeOut = Omit<ModuleEdgeRow, 'id' | 'file_id' | 'symbol_id' | 'resolved_file_id'>;
@@ -871,6 +872,153 @@ const IGNORED_IDENTIFIERS = new Set([
   'require',
 ]);
 
+type RefKind = 'call' | 'read' | 'write' | 'type-ref' | 'declaration';
+
+/**
+ * Walk up ancestors looking for a type-context node. Stops at the first
+ * enclosing statement / expression where a type is unambiguously expected.
+ */
+function isInTypeContext(node: Parser.SyntaxNode): boolean {
+  let cur: Parser.SyntaxNode | null = node.parent;
+  while (cur) {
+    switch (cur.type) {
+      case 'type_annotation':
+      case 'type_parameter':
+      case 'type_arguments':
+      case 'type_alias_declaration':
+      case 'interface_declaration':
+      case 'index_signature':
+      case 'property_signature':
+      case 'method_signature':
+      case 'construct_signature':
+      case 'extends_clause':
+      case 'implements_clause':
+      case 'generic_type':
+      case 'type_query':
+      case 'typeof_type':
+      case 'tuple_type':
+      case 'union_type':
+      case 'intersection_type':
+      case 'conditional_type':
+      case 'mapped_type_clause':
+        return true;
+      case 'statement_block':
+      case 'function_declaration':
+      case 'arrow_function':
+      case 'method_definition':
+      case 'class_body':
+      case 'program':
+        return false;
+    }
+    cur = cur.parent;
+  }
+  return false;
+}
+
+/**
+ * Determine the reference kind for an identifier occurrence based on its
+ * AST context. Walks up from the identifier looking at parent node types.
+ *
+ * Values returned: 'call' | 'read' | 'write' | 'type-ref' | 'declaration'.
+ *
+ * Falls back to 'read' when no stronger signal applies — reads dominate
+ * in source code, so this is the safe default.
+ */
+function classifyRefKind(node: Parser.SyntaxNode): RefKind {
+  const parent = node.parent;
+  if (!parent) return 'read';
+
+  // Declaration contexts — the identifier is being introduced.
+  if (parent.type === 'variable_declarator' && parent.childForFieldName('name') === node) {
+    return 'declaration';
+  }
+  if (
+    (parent.type === 'function_declaration' ||
+      parent.type === 'function_expression' ||
+      parent.type === 'arrow_function' ||
+      parent.type === 'method_definition' ||
+      parent.type === 'method_signature' ||
+      parent.type === 'class_declaration' ||
+      parent.type === 'class_expression' ||
+      parent.type === 'interface_declaration' ||
+      parent.type === 'type_alias_declaration' ||
+      parent.type === 'enum_declaration' ||
+      parent.type === 'abstract_class_declaration') &&
+    parent.childForFieldName('name') === node
+  ) {
+    return 'declaration';
+  }
+  if (parent.type === 'required_parameter' || parent.type === 'optional_parameter') {
+    if (parent.childForFieldName('pattern') === node) return 'declaration';
+  }
+  if (
+    parent.type === 'shorthand_property_identifier' ||
+    parent.type === 'shorthand_property_identifier_pattern'
+  ) {
+    return 'declaration';
+  }
+
+  // Type-ref contexts — identifier appears in a type annotation or is a
+  // `type_identifier` node.
+  if (node.type === 'type_identifier') return 'type-ref';
+  if (isInTypeContext(node)) return 'type-ref';
+
+  // Call contexts — the identifier is the callee of a call_expression
+  // (field: function) or new_expression (field: constructor).
+  if (
+    parent.type === 'call_expression' &&
+    parent.childForFieldName('function') === node
+  ) {
+    return 'call';
+  }
+  if (
+    parent.type === 'new_expression' &&
+    parent.childForFieldName('constructor') === node
+  ) {
+    return 'call';
+  }
+  // Member call: obj.method() — the property_identifier at the member
+  // expression's property field, when the member is the function of a
+  // call_expression, is a call.
+  if (
+    parent.type === 'member_expression' &&
+    parent.childForFieldName('property') === node &&
+    parent.parent?.type === 'call_expression' &&
+    parent.parent.childForFieldName('function') === parent
+  ) {
+    return 'call';
+  }
+
+  // Write contexts — LHS of an assignment or target of an update.
+  if (
+    parent.type === 'assignment_expression' &&
+    parent.childForFieldName('left') === node
+  ) {
+    return 'write';
+  }
+  if (
+    parent.type === 'augmented_assignment_expression' &&
+    parent.childForFieldName('left') === node
+  ) {
+    return 'write';
+  }
+  if (parent.type === 'update_expression') {
+    return 'write';
+  }
+  // LHS is a member_expression whose property is this identifier, enclosed
+  // in an assignment: obj.x = 1
+  if (
+    parent.type === 'member_expression' &&
+    parent.childForFieldName('property') === node &&
+    parent.parent?.type === 'assignment_expression' &&
+    parent.parent.childForFieldName('left') === parent
+  ) {
+    return 'write';
+  }
+
+  return 'read';
+}
+
 function extractOccurrences(root: Parser.SyntaxNode, source: string): OccOut[] {
   const occurrences: OccOut[] = [];
   const seen = new Set<string>(); // Dedup: "name:line:col"
@@ -889,6 +1037,7 @@ function extractOccurrences(root: Parser.SyntaxNode, source: string): OccOut[] {
             col: node.startPosition.column,
             context: buildContext(lines, node.startPosition.row),
             confidence: 'heuristic',
+            ref_kind: classifyRefKind(node),
           });
         }
       }
@@ -929,6 +1078,7 @@ const typescriptAdapter: LanguageAdapter = {
     typeExports: true,
     docstrings: true,
     signatures: true,
+    refKinds: ['call', 'read', 'write', 'type-ref', 'declaration'],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
@@ -943,3 +1093,15 @@ const typescriptAdapter: LanguageAdapter = {
 // Register for both typescript and javascript (same adapter, same AST patterns)
 registerAdapter(typescriptAdapter);
 registerAdapter({ ...typescriptAdapter, language: 'javascript' });
+
+/**
+ * Test-only helper: parse a TypeScript source string and return its
+ * occurrences. Exists solely to make ref_kind classification testable
+ * without booting tree-sitter bindings in every call site.
+ */
+export function extractOccurrencesForTest(source: string): OccOut[] {
+  const parser = getParserForTest('typescript');
+  if (!parser) throw new Error('TypeScript parser unavailable');
+  const tree = parser.parse(source);
+  return extractOccurrences(tree.rootNode, source);
+}

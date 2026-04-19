@@ -5,6 +5,7 @@ import type Database from 'better-sqlite3';
 import { NexusStore } from '../db/store.js';
 import type { SymbolRow, FileRow, ModuleEdgeRow, SymbolWithFile, OccurrenceWithFile, ImportEdgeWithFile } from '../db/store.js';
 import { getAllAdapters } from '../analysis/languages/registry.js';
+import type { LanguageCapabilities } from '../analysis/languages/registry.js';
 import { extractSource } from '../analysis/extractor.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
@@ -66,6 +67,7 @@ export interface OccurrenceResult {
   col: number;
   context: string;
   confidence: 'exact' | 'heuristic';
+  ref_kind?: string | null;
 }
 
 export interface ModuleEdgeResult {
@@ -114,16 +116,7 @@ export interface IndexStats {
   languages: Record<string, {
     files: number;
     symbols: number;
-    capabilities: {
-      definitions: true;
-      imports: boolean;
-      exports: boolean;
-      occurrences: boolean;
-      occurrenceQuality: 'exact' | 'heuristic';
-      typeExports: boolean;
-      docstrings: boolean;
-      signatures: boolean;
-    };
+    capabilities: LanguageCapabilities;
   }>;
   index_status: 'current' | 'stale' | 'reindexing';
   index_health: 'ok' | 'partial';
@@ -195,6 +188,7 @@ export interface CallerCallSite {
   line: number;
   col: number;
   context: string;
+  ref_kind?: string | null;
 }
 
 export interface CallerResult {
@@ -359,10 +353,17 @@ export class QueryEngine {
   /**
    * Find all occurrences of an identifier (aliased as `refs`).
    */
-  occurrences(name: string): NexusResult<OccurrenceResult> {
+  occurrences(
+    name: string,
+    opts?: { ref_kinds?: string[] },
+  ): NexusResult<OccurrenceResult> {
     const start = performance.now();
 
-    const rows = this.store.getOccurrencesWithFile(name);
+    const rows = this.store.getOccurrencesWithFileFiltered(name, opts?.ref_kinds);
+
+    const refKindSuffix = opts?.ref_kinds?.length
+      ? ` --ref-kinds ${opts.ref_kinds.join(',')}`
+      : '';
 
     const results: OccurrenceResult[] = rows.map(row => ({
       name: row.name,
@@ -371,9 +372,10 @@ export class QueryEngine {
       col: row.col,
       context: row.context ?? '',
       confidence: row.confidence as 'exact' | 'heuristic',
+      ...(row.ref_kind !== undefined ? { ref_kind: row.ref_kind } : {}),
     }));
 
-    return this.wrap('occurrences', `refs ${name}`, results, start);
+    return this.wrap('occurrences', `refs ${name}${refKindSuffix}`, results, start);
   }
 
   /**
@@ -691,6 +693,7 @@ export class QueryEngine {
           typeExports: false,
           docstrings: false,
           signatures: false,
+          refKinds: [],
         },
       };
     }
@@ -926,7 +929,7 @@ export class QueryEngine {
    * Extract a symbol and the named symbols it references inside its body.
    * This is a name-based approximation designed to save file reads.
    */
-  slice(name: string, opts?: { file?: string; limit?: number }): NexusResult<SliceResult> {
+  slice(name: string, opts?: { file?: string; limit?: number; ref_kinds?: string[] }): NexusResult<SliceResult> {
     const start = performance.now();
     let joined = this.store.getSymbolsWithFile(name);
     if (joined.length === 0) {
@@ -955,10 +958,11 @@ export class QueryEngine {
       return this.wrap('slice', buildSliceQuery(name, opts), [], start);
     }
 
-    const occurrences = this.store.getOccurrencesInRange(
+    const occurrences = this.store.getOccurrencesInRangeFiltered(
       root.file_id,
       rootSource.line,
       rootSource.end_line,
+      opts?.ref_kinds,
     );
     const referencedNames: string[] = [];
     const seenNames = new Set<string>();
@@ -1219,12 +1223,15 @@ export class QueryEngine {
    */
   callers(
     name: string,
-    opts?: { file?: string; depth?: number; limit?: number },
+    opts?: { file?: string; depth?: number; limit?: number; ref_kinds?: string[] },
   ): NexusResult<CallersResult> {
     const start = performance.now();
     const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 100);
     const depth = Math.min(Math.max(opts?.depth ?? 1, 1), 3);
-    const query = `callers ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.depth ? ` --depth ${opts.depth}` : ''}`;
+    const refKindSuffix = opts?.ref_kinds?.length
+      ? ` --ref-kinds ${opts.ref_kinds.join(',')}`
+      : '';
+    const query = `callers ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.depth ? ` --depth ${opts.depth}` : ''}${refKindSuffix}`;
 
     let defs = this.store.getSymbolsWithFile(name);
     if (defs.length === 0) {
@@ -1245,7 +1252,7 @@ export class QueryEngine {
 
     const result: CallersResult = {
       target: symbolWithFileToResult(target),
-      callers: this.findCallersForSymbol(target, depth, limit, new Set([target.id])),
+      callers: this.findCallersForSymbol(target, depth, limit, new Set([target.id]), opts?.ref_kinds),
     };
 
     if (defs.length > 1 && !opts?.file) {
@@ -1263,8 +1270,9 @@ export class QueryEngine {
     depth: number,
     limit: number,
     visited: Set<number>,
+    refKinds: string[] | undefined,
   ): CallerResult[] {
-    const occurrences = this.store.getOccurrencesByName(target.name);
+    const occurrences = this.store.getOccurrencesByNameFiltered(target.name, refKinds);
     const callerMap = new Map<number, { caller: SymbolWithFile; sites: CallerCallSite[] }>();
 
     for (const occ of occurrences) {
@@ -1289,6 +1297,7 @@ export class QueryEngine {
         line: occ.line,
         col: occ.col,
         context: occ.context ?? '',
+        ...(occ.ref_kind !== undefined ? { ref_kind: occ.ref_kind } : {}),
       };
 
       if (existing) {
@@ -1318,7 +1327,7 @@ export class QueryEngine {
       if (depth > 1) {
         const nextVisited = new Set(visited);
         nextVisited.add(caller.id);
-        const recursed = this.findCallersForSymbol(caller, depth - 1, limit, nextVisited);
+        const recursed = this.findCallersForSymbol(caller, depth - 1, limit, nextVisited, refKinds);
         if (recursed.length > 0) entry.callers = recursed;
       }
       callers.push(entry);
@@ -1386,11 +1395,19 @@ export class QueryEngine {
    * Find exports with no importers and no occurrences outside their own file.
    * Best-effort dead-code finder. Note: re-exports through index.ts will
    * appear unused if nothing imports them externally; filter by path to scope.
+   *
+   * mode='runtime_only' excludes type-only importers (is_type=1) and
+   * type-ref occurrences (ref_kind='type-ref') from the "used" evidence,
+   * surfacing exports that are runtime-dead even if consumed in type positions.
    */
-  unusedExports(opts?: { path?: string; limit?: number }): NexusResult<UnusedExportResult> {
+  unusedExports(
+    opts?: { path?: string; limit?: number; mode?: 'default' | 'runtime_only' },
+  ): NexusResult<UnusedExportResult> {
     const start = performance.now();
     const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
-    const query = `unused_exports${opts?.path ? ` --path ${opts.path}` : ''}`;
+    const mode = opts?.mode ?? 'default';
+    const modeSuffix = mode === 'runtime_only' ? ' --mode runtime_only' : '';
+    const query = `unused_exports${opts?.path ? ` --path ${opts.path}` : ''}${modeSuffix}`;
 
     const exports = this.store.getAllExports(opts?.path);
     const results: UnusedExportResult[] = [];
@@ -1402,16 +1419,23 @@ export class QueryEngine {
 
       // Check if any other file imports this file (resolved_file_id match)
       const importers = this.store.getImportersByResolvedFileId(exp.file_id);
-      const namedImporters = importers.filter(imp =>
-        imp.is_star || imp.is_default
-          ? false
-          : imp.name === exp.name || imp.alias === exp.name,
-      );
+      const namedImporters = importers.filter(imp => {
+        if (imp.is_star || imp.is_default) return false;
+        if (imp.name !== exp.name && imp.alias !== exp.name) return false;
+        // In runtime_only mode, a type-only import (is_type=1) does not count
+        // as a "use".
+        if (mode === 'runtime_only' && imp.is_type) return false;
+        return true;
+      });
       if (namedImporters.length > 0) continue;
 
       // Check occurrences in OTHER files
-      const occurrences = this.store.getOccurrencesByName(exp.name);
-      const externalOccurrences = occurrences.filter(o => o.file_id !== exp.file_id);
+      let externalOccurrences = this.store
+        .getOccurrencesByName(exp.name)
+        .filter(o => o.file_id !== exp.file_id);
+      if (mode === 'runtime_only') {
+        externalOccurrences = externalOccurrences.filter(o => o.ref_kind !== 'type-ref');
+      }
       if (externalOccurrences.length > 0) continue;
 
       // Look up kind via local symbol if available
@@ -1825,9 +1849,9 @@ function normalizePath(p: string): string {
 
 function buildSliceQuery(
   name: string,
-  opts?: { file?: string; limit?: number },
+  opts?: { file?: string; limit?: number; ref_kinds?: string[] },
 ): string {
-  return `slice ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.limit ? ` --limit ${opts.limit}` : ''}`;
+  return `slice ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.limit ? ` --limit ${opts.limit}` : ''}${opts?.ref_kinds?.length ? ` --ref-kinds ${opts.ref_kinds.join(',')}` : ''}`;
 }
 
 /** Cheap deterministic token estimate (chars / 4). */

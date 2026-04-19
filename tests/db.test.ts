@@ -716,3 +716,159 @@ describe('IndexLock', () => {
     expect(lock.getLockInfo()).toBeNull();
   });
 });
+
+describe('schema v2 ref_kind', () => {
+  it('SCHEMA_VERSION is 2', async () => {
+    const { SCHEMA_VERSION } = await import('../src/db/schema.js');
+    expect(SCHEMA_VERSION).toBe(2);
+  });
+
+  it('occurrences table has a nullable ref_kind column', () => {
+    const db = new Database(':memory:');
+    applySchema(db);
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as {
+      name: string;
+      type: string;
+      notnull: number;
+    }[];
+    const refKind = cols.find(c => c.name === 'ref_kind');
+    expect(refKind).toBeDefined();
+    expect(refKind!.type.toUpperCase()).toBe('TEXT');
+    expect(refKind!.notnull).toBe(0);
+  });
+
+  it('accepts NULL ref_kind via insert', () => {
+    const db = new Database(':memory:');
+    applySchema(db);
+    initializeMeta(db, '/test', true);
+    const store = new NexusStore(db);
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrence({
+      file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'heuristic',
+    });
+    const row = db.prepare('SELECT ref_kind FROM occurrences WHERE name = ?').get('foo') as { ref_kind: string | null };
+    expect(row.ref_kind).toBeNull();
+  });
+});
+
+describe('store ref_kind I/O', () => {
+  let db: Database.Database;
+  let store: NexusStore;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    applySchema(db);
+    initializeMeta(db, '/test', true);
+    store = new NexusStore(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('insertOccurrence persists ref_kind', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrence({
+      file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'exact', ref_kind: 'call',
+    });
+    const row = db.prepare('SELECT ref_kind FROM occurrences WHERE name = ?').get('foo') as { ref_kind: string };
+    expect(row.ref_kind).toBe('call');
+  });
+
+  it('insertOccurrences batch persists ref_kind per row', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrences([
+      { file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: fid, name: 'foo', line: 2, col: 0, confidence: 'exact', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'bar', line: 3, col: 0, confidence: 'exact' },
+    ]);
+    const rows = db.prepare('SELECT ref_kind FROM occurrences ORDER BY line').all() as { ref_kind: string | null }[];
+    expect(rows).toEqual([{ ref_kind: 'call' }, { ref_kind: 'type-ref' }, { ref_kind: null }]);
+  });
+
+  it('getOccurrencesByNameFiltered returns only matching kinds', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrences([
+      { file_id: fid, name: 'foo', line: 1, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: fid, name: 'foo', line: 2, col: 0, confidence: 'exact', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'foo', line: 3, col: 0, confidence: 'exact', ref_kind: null },
+    ]);
+    const calls = store.getOccurrencesByNameFiltered('foo', ['call']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].line).toBe(1);
+
+    const callOrType = store.getOccurrencesByNameFiltered('foo', ['call', 'type-ref']);
+    expect(callOrType.map(r => r.line).sort()).toEqual([1, 2]);
+
+    const noFilter = store.getOccurrencesByNameFiltered('foo', undefined);
+    expect(noFilter).toHaveLength(3); // includes NULL row
+  });
+
+  it('getOccurrencesInRangeFiltered filters by ref_kind', () => {
+    const fid = store.insertFile({
+      path: 'a.ts', path_key: 'a.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store.insertOccurrences([
+      { file_id: fid, name: 'a', line: 10, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: fid, name: 'b', line: 12, col: 0, confidence: 'exact', ref_kind: 'type-ref' },
+      { file_id: fid, name: 'c', line: 14, col: 0, confidence: 'exact', ref_kind: 'read' },
+    ]);
+    const calls = store.getOccurrencesInRangeFiltered(fid, 1, 20, ['call']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe('a');
+  });
+});
+
+describe('schema migration on version bump', () => {
+  it('drops v1 tables and recreates on version mismatch', () => {
+    const db = new Database(':memory:');
+    // Simulate v1 state: apply old-style schema (occurrences without ref_kind)
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL, path_key TEXT UNIQUE, hash TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, language TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'indexed', error TEXT, indexed_at TEXT NOT NULL);
+      CREATE TABLE occurrences (id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, name TEXT NOT NULL, line INTEGER NOT NULL, col INTEGER NOT NULL, context TEXT, confidence TEXT NOT NULL DEFAULT 'heuristic');
+      INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+      INSERT INTO meta (key, value) VALUES ('extractor_version', '2');
+    `);
+    // Apply the current schema — should drop-and-recreate, not error
+    expect(() => applySchema(db)).not.toThrow();
+    // Verify ref_kind column now exists
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as { name: string }[];
+    expect(cols.some(c => c.name === 'ref_kind')).toBe(true);
+    // Verify the new index exists
+    const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_occur_name_refkind'").get();
+    expect(idx).toBeDefined();
+    db.close();
+  });
+
+  it('is a no-op on a fresh database (no meta table)', () => {
+    const db = new Database(':memory:');
+    // No meta table yet — applySchema should just create from scratch
+    expect(() => applySchema(db)).not.toThrow();
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as { name: string }[];
+    expect(cols.some(c => c.name === 'ref_kind')).toBe(true);
+    db.close();
+  });
+
+  it('is a no-op when versions match current', () => {
+    const db = new Database(':memory:');
+    applySchema(db);
+    initializeMeta(db, '/test', true);
+    // Second applySchema should not drop or error
+    expect(() => applySchema(db)).not.toThrow();
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as { name: string }[];
+    expect(cols.some(c => c.name === 'ref_kind')).toBe(true);
+    db.close();
+  });
+});

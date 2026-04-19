@@ -13,6 +13,13 @@ export interface LanguageCapabilities {
   typeExports: boolean;
   docstrings: boolean;
   signatures: boolean;
+  /**
+   * The set of ref_kind values this adapter emits on occurrences.
+   * Empty array means the adapter does not classify — occurrences will have
+   * ref_kind = null. Consumers should not assume precision for a ref_kind
+   * unless it appears here.
+   */
+  refKinds: string[];
 }
 
 /**
