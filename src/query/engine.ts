@@ -919,7 +919,7 @@ export class QueryEngine {
    * Extract a symbol and the named symbols it references inside its body.
    * This is a name-based approximation designed to save file reads.
    */
-  slice(name: string, opts?: { file?: string; limit?: number }): NexusResult<SliceResult> {
+  slice(name: string, opts?: { file?: string; limit?: number; ref_kinds?: string[] }): NexusResult<SliceResult> {
     const start = performance.now();
     let joined = this.store.getSymbolsWithFile(name);
     if (joined.length === 0) {
@@ -948,10 +948,11 @@ export class QueryEngine {
       return this.wrap('slice', buildSliceQuery(name, opts), [], start);
     }
 
-    const occurrences = this.store.getOccurrencesInRange(
+    const occurrences = this.store.getOccurrencesInRangeFiltered(
       root.file_id,
       rootSource.line,
       rootSource.end_line,
+      opts?.ref_kinds,
     );
     const referencedNames: string[] = [];
     const seenNames = new Set<string>();
@@ -1822,9 +1823,9 @@ function normalizePath(p: string): string {
 
 function buildSliceQuery(
   name: string,
-  opts?: { file?: string; limit?: number },
+  opts?: { file?: string; limit?: number; ref_kinds?: string[] },
 ): string {
-  return `slice ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.limit ? ` --limit ${opts.limit}` : ''}`;
+  return `slice ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.limit ? ` --limit ${opts.limit}` : ''}${opts?.ref_kinds?.length ? ` --ref-kinds ${opts.ref_kinds.join(',')}` : ''}`;
 }
 
 /** Cheap deterministic token estimate (chars / 4). */
