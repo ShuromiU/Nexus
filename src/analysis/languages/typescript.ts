@@ -963,11 +963,17 @@ function classifyRefKind(node: Parser.SyntaxNode): RefKind {
   if (node.type === 'type_identifier') return 'type-ref';
   if (isInTypeContext(node)) return 'type-ref';
 
-  // Call contexts — the identifier is the callee of a call_expression or
-  // new_expression.
+  // Call contexts — the identifier is the callee of a call_expression
+  // (field: function) or new_expression (field: constructor).
   if (
-    (parent.type === 'call_expression' || parent.type === 'new_expression') &&
+    parent.type === 'call_expression' &&
     parent.childForFieldName('function') === node
+  ) {
+    return 'call';
+  }
+  if (
+    parent.type === 'new_expression' &&
+    parent.childForFieldName('constructor') === node
   ) {
     return 'call';
   }

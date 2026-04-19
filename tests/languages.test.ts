@@ -480,4 +480,12 @@ describe('typescript adapter — ref_kind classification', () => {
     const reads = occs.filter(o => o.name === 'xs' && o.ref_kind === 'read');
     expect(reads.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('emits call for new expression constructor', async () => {
+    const { extractOccurrencesForTest } = await import('../src/analysis/languages/typescript.js');
+    const src = 'class Widget {} const w = new Widget();';
+    const occs = extractOccurrencesForTest(src);
+    const constructorCalls = occs.filter(o => o.name === 'Widget' && o.ref_kind === 'call');
+    expect(constructorCalls.length).toBe(1);
+  });
 });
