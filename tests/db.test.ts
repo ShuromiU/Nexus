@@ -829,3 +829,46 @@ describe('store ref_kind I/O', () => {
     expect(calls[0].name).toBe('a');
   });
 });
+
+describe('schema migration on version bump', () => {
+  it('drops v1 tables and recreates on version mismatch', () => {
+    const db = new Database(':memory:');
+    // Simulate v1 state: apply old-style schema (occurrences without ref_kind)
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL, path_key TEXT UNIQUE, hash TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, language TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'indexed', error TEXT, indexed_at TEXT NOT NULL);
+      CREATE TABLE occurrences (id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, name TEXT NOT NULL, line INTEGER NOT NULL, col INTEGER NOT NULL, context TEXT, confidence TEXT NOT NULL DEFAULT 'heuristic');
+      INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+      INSERT INTO meta (key, value) VALUES ('extractor_version', '2');
+    `);
+    // Apply the current schema — should drop-and-recreate, not error
+    expect(() => applySchema(db)).not.toThrow();
+    // Verify ref_kind column now exists
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as { name: string }[];
+    expect(cols.some(c => c.name === 'ref_kind')).toBe(true);
+    // Verify the new index exists
+    const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_occur_name_refkind'").get();
+    expect(idx).toBeDefined();
+    db.close();
+  });
+
+  it('is a no-op on a fresh database (no meta table)', () => {
+    const db = new Database(':memory:');
+    // No meta table yet — applySchema should just create from scratch
+    expect(() => applySchema(db)).not.toThrow();
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as { name: string }[];
+    expect(cols.some(c => c.name === 'ref_kind')).toBe(true);
+    db.close();
+  });
+
+  it('is a no-op when versions match current', () => {
+    const db = new Database(':memory:');
+    applySchema(db);
+    initializeMeta(db, '/test', true);
+    // Second applySchema should not drop or error
+    expect(() => applySchema(db)).not.toThrow();
+    const cols = db.prepare("PRAGMA table_info('occurrences')").all() as { name: string }[];
+    expect(cols.some(c => c.name === 'ref_kind')).toBe(true);
+    db.close();
+  });
+});
