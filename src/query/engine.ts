@@ -67,6 +67,7 @@ export interface OccurrenceResult {
   col: number;
   context: string;
   confidence: 'exact' | 'heuristic';
+  ref_kind?: string | null;
 }
 
 export interface ModuleEdgeResult {
@@ -187,6 +188,7 @@ export interface CallerCallSite {
   line: number;
   col: number;
   context: string;
+  ref_kind?: string | null;
 }
 
 export interface CallerResult {
@@ -370,6 +372,7 @@ export class QueryEngine {
       col: row.col,
       context: row.context ?? '',
       confidence: row.confidence as 'exact' | 'heuristic',
+      ...(row.ref_kind !== undefined ? { ref_kind: row.ref_kind } : {}),
     }));
 
     return this.wrap('occurrences', `refs ${name}${refKindSuffix}`, results, start);
@@ -1294,6 +1297,7 @@ export class QueryEngine {
         line: occ.line,
         col: occ.col,
         context: occ.context ?? '',
+        ...(occ.ref_kind !== undefined ? { ref_kind: occ.ref_kind } : {}),
       };
 
       if (existing) {

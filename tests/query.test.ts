@@ -1303,6 +1303,57 @@ describe('callers ref_kinds filter', () => {
     expect(result.results[0].callers[0].call_sites.length).toBe(1);
     expect(result.results[0].callers[0].call_sites[0].line).toBe(15);
   });
+
+  it('call_sites include ref_kind field', () => {
+    const result = engine2.callers('parse', { ref_kinds: ['call'] });
+    const site = result.results[0].callers[0].call_sites[0];
+    expect(site.ref_kind).toBe('call');
+  });
+});
+
+describe('occurrences ref_kind projection', () => {
+  let db3: Database.Database;
+  let store3: NexusStore;
+  let engine3: QueryEngine;
+
+  beforeEach(() => {
+    db3 = new Database(':memory:');
+    db3.pragma('journal_mode = WAL');
+    db3.pragma('foreign_keys = ON');
+    applySchema(db3);
+    store3 = new NexusStore(db3);
+    initializeMeta(db3, '/test', true);
+
+    const f = store3.insertFile({
+      path: 'src/app.ts', path_key: 'src/app.ts', hash: 'h', mtime: 1, size: 1,
+      language: 'typescript', status: 'indexed', indexed_at: '2026-04-19T00:00:00Z',
+    });
+    store3.insertOccurrences([
+      { file_id: f, name: 'render', line: 5, col: 0, confidence: 'exact', ref_kind: 'call' },
+      { file_id: f, name: 'render', line: 10, col: 0, confidence: 'heuristic', ref_kind: 'type-ref' },
+    ]);
+    store3.setMeta('last_indexed_at', '2026-04-19T00:00:00Z');
+    engine3 = new QueryEngine(db3);
+  });
+
+  afterEach(() => db3.close());
+
+  it('projects ref_kind onto OccurrenceResult', () => {
+    const result = engine3.occurrences('render');
+    expect(result.count).toBe(2);
+    const callSite = result.results.find(r => r.line === 5);
+    expect(callSite).toBeDefined();
+    expect(callSite!.ref_kind).toBe('call');
+    const typeRef = result.results.find(r => r.line === 10);
+    expect(typeRef).toBeDefined();
+    expect(typeRef!.ref_kind).toBe('type-ref');
+  });
+
+  it('filtered occurrences still include ref_kind', () => {
+    const result = engine3.occurrences('render', { ref_kinds: ['call'] });
+    expect(result.count).toBe(1);
+    expect(result.results[0].ref_kind).toBe('call');
+  });
 });
 
 describe('QueryEngine.unusedExports', () => {
