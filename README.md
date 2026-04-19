@@ -261,6 +261,8 @@ The script reads `$CLAUDE_PROJECT_DIR` (set by Claude Code) and falls back to `$
 
 Every tool accepts an optional `compact: true` flag that returns a minimal-key envelope (~50% smaller payload).
 
+`nexus_refs`, `nexus_callers`, and `nexus_slice` accept an optional `ref_kinds?: string[]` filter (TypeScript/JavaScript only) to narrow results to specific occurrence types: `call`, `read`, `write`, `type-ref`, or `declaration`. `nexus_unused_exports` adds a `mode: 'default' | 'runtime_only'` option — `runtime_only` excludes type-only references so pure type exports are not flagged as dead code.
+
 #### Discovery
 | Tool | What it does | Example |
 |------|--------------|---------|
