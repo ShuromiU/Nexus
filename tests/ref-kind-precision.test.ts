@@ -12,9 +12,12 @@ import { extractOccurrencesForTest } from '../src/analysis/languages/typescript.
  * name.length <= 1 (intentional noise suppression for i/j/k loop vars).
  *
  * Note on member writes: the extractor emits the *base* (`obj`) as a read
- * when it sees `obj.a = 2`, not the member `a` — member property names are
- * not tracked as separate occurrences. The write samples below use only
- * plain variable assignments and update-expressions which are actually emitted.
+ * when it sees `obj.a = 2`, not the member `a`. The member name `a` is
+ * dropped by the name.length <= 1 noise guard in typescript.ts (intentional
+ * suppression for single-char identifiers like i/j/k loop vars and short
+ * property names), not because member property names are structurally excluded
+ * from occurrence tracking. The write samples below use only plain variable
+ * assignments and update-expressions which are actually emitted.
  */
 interface Label {
   name: string;
