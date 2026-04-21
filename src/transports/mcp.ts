@@ -489,6 +489,31 @@ export function createMcpServer(): Server {
             required: ['calls'],
           },
         },
+        {
+          name: 'nexus_structured_query',
+          description: 'Extract a single value from a structured config file (package.json, tsconfig, Cargo.toml, GHA workflow, generic JSON/YAML/TOML). Path uses dotted keys with numeric array indices: "scripts.test", "jobs.test.steps.0.run". Avoids reading the whole file.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              file: { type: 'string', description: 'Path to the structured file (relative to repo root or absolute).' },
+              path: { type: 'string', description: 'Dotted path into the parsed value. Numeric segments index into arrays.' },
+              ...COMPACT_PROP,
+            },
+            required: ['file', 'path'],
+          },
+        },
+        {
+          name: 'nexus_structured_outline',
+          description: 'List top-level keys of a structured file with their value kinds (string, number, boolean, null, array, object). Short previews for scalars; array length for arrays. Avoids reading the whole file.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              file: { type: 'string', description: 'Path to the structured file (relative to repo root or absolute).' },
+              ...COMPACT_PROP,
+            },
+            required: ['file'],
+          },
+        },
       ],
     };
   });
@@ -575,6 +600,10 @@ export function createMcpServer(): Server {
         });
       case 'nexus_doc':
         return qe.doc(args.name as string, { file: args.file as string | undefined });
+      case 'nexus_structured_query':
+        return qe.structuredQuery(args.file as string, args.path as string);
+      case 'nexus_structured_outline':
+        return qe.structuredOutline(args.file as string);
       default:
         throw new Error(`Unknown tool: ${toolName}`);
     }

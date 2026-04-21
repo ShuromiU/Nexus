@@ -140,6 +140,25 @@ describe('MCP schemas surface new options', () => {
     const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
     expect(schema.properties).toHaveProperty('mode');
   });
+
+  it('registers nexus_structured_query with file + path', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_structured_query');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    expect(schema.properties).toHaveProperty('file');
+    expect(schema.properties).toHaveProperty('path');
+    expect(schema.required).toEqual(expect.arrayContaining(['file', 'path']));
+  });
+
+  it('registers nexus_structured_outline with file', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_structured_outline');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    expect(schema.properties).toHaveProperty('file');
+    expect(schema.required).toEqual(['file']);
+  });
 });
 
 // ── Response Shape Tests ──────────────────────────────────────────────
