@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import {
   loadPackageJson, loadTsconfig, loadGenericJson,
+  loadGhaWorkflow, loadGenericYaml, loadCargoToml, loadGenericToml,
 } from '../src/analysis/documents/loaders.js';
 import { resetDocumentCache } from '../src/analysis/documents/cache.js';
 
@@ -114,5 +115,87 @@ describe('loadGenericJson', () => {
     if (r && typeof r === 'object' && 'error' in (r as object)) {
       expect((r as { error: string }).error).toBe('file_too_large');
     }
+  });
+});
+
+describe('loadGhaWorkflow', () => {
+  it('reads and parses a workflow', () => {
+    const src = `name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+`;
+    const p = write('.github-workflow.yml', src);
+    const r = loadGhaWorkflow(p);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.name).toBe('CI');
+    expect(r.jobs?.test?.steps?.[0].run).toBe('echo hi');
+  });
+
+  it('enforces the 1 MB cap', () => {
+    const big = 'name: X\nfoo: ' + 'x'.repeat(1_048_600);
+    const p = write('big.yml', big);
+    const r = loadGhaWorkflow(p);
+    if (!('error' in r)) throw new Error('should have errored');
+    expect(r.error).toBe('file_too_large');
+  });
+});
+
+describe('loadGenericYaml', () => {
+  it('returns arbitrary parsed YAML', () => {
+    const p = write('data.yml', 'a: 1\nb: [2, 3]\n');
+    const r = loadGenericYaml(p);
+    expect(r).toEqual({ a: 1, b: [2, 3] });
+  });
+
+  it('enforces the 5 MB cap', () => {
+    const big = 'blob: ' + 'x'.repeat(5 * 1024 * 1024 + 100);
+    const p = write('big.yaml', big);
+    const r = loadGenericYaml(p);
+    expect(r && typeof r === 'object' && 'error' in (r as object)).toBe(true);
+  });
+});
+
+describe('loadCargoToml', () => {
+  it('reads and parses', () => {
+    const src = `
+[package]
+name = "x"
+version = "0.1.0"
+
+[dependencies]
+serde = "1"
+`;
+    const p = write('Cargo.toml', src);
+    const r = loadCargoToml(p);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.package?.name).toBe('x');
+    expect(r.dependencies?.serde).toBe('1');
+  });
+
+  it('enforces the 1 MB cap', () => {
+    const big = '[x]\nk = "' + 'v'.repeat(1_048_600) + '"\n';
+    const p = write('Cargo.toml', big);
+    const r = loadCargoToml(p);
+    if (!('error' in r)) throw new Error('should have errored');
+    expect(r.error).toBe('file_too_large');
+  });
+});
+
+describe('loadGenericToml', () => {
+  it('returns arbitrary parsed TOML', () => {
+    const p = write('conf.toml', 'title = "t"\n[x]\nk = 1\n');
+    const r = loadGenericToml(p);
+    expect(r).toEqual({ title: 't', x: { k: 1 } });
+  });
+
+  it('enforces the 5 MB cap', () => {
+    const big = 'blob = "' + 'x'.repeat(5 * 1024 * 1024 + 100) + '"\n';
+    const p = write('big.toml', big);
+    const r = loadGenericToml(p);
+    expect(r && typeof r === 'object' && 'error' in (r as object)).toBe(true);
   });
 });

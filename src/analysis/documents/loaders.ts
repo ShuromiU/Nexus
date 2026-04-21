@@ -2,6 +2,10 @@ import * as fs from 'node:fs';
 import { parsePackageJson, type ParsedPackageJson } from './package-json.js';
 import { parseTsconfig, type ParsedTsconfig } from './tsconfig.js';
 import { parseGenericJson } from './generic-json.js';
+import { parseGhaWorkflow, type ParsedGhaWorkflow } from './gha-workflow.js';
+import { parseGenericYaml } from './generic-yaml.js';
+import { parseCargoToml, type ParsedCargoToml } from './cargo-toml.js';
+import { parseGenericToml } from './generic-toml.js';
 import { getDocumentCache } from './cache.js';
 
 export const SIZE_CAPS = {
@@ -63,4 +67,20 @@ export function loadTsconfig(absPath: string): ParsedTsconfig | LoadError {
 
 export function loadGenericJson(absPath: string): unknown | LoadError {
   return loadCached(absPath, SIZE_CAPS.json_generic, parseGenericJson);
+}
+
+export function loadGhaWorkflow(absPath: string): ParsedGhaWorkflow | LoadError {
+  return loadCached(absPath, SIZE_CAPS.gha_workflow, parseGhaWorkflow);
+}
+
+export function loadGenericYaml(absPath: string): unknown | LoadError {
+  return loadCached(absPath, SIZE_CAPS.yaml_generic, parseGenericYaml);
+}
+
+export function loadCargoToml(absPath: string): ParsedCargoToml | LoadError {
+  return loadCached(absPath, SIZE_CAPS.cargo_toml, parseCargoToml);
+}
+
+export function loadGenericToml(absPath: string): unknown | LoadError {
+  return loadCached(absPath, SIZE_CAPS.toml_generic, parseGenericToml);
 }
