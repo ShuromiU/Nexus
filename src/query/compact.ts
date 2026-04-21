@@ -13,6 +13,7 @@ import type { NexusResult, NexusResultType } from './engine.js';
 
 /** Single-letter key map. Keep alphabetized by long key for review sanity. */
 const KEY_MAP: Record<string, string> = {
+  actual: 'ac',
   alias: 'a',
   call_sites: 'cs',
   callers: 'cl',
@@ -28,14 +29,19 @@ const KEY_MAP: Record<string, string> = {
   doc: 'd',
   doc_summary: 'ds',
   end_line: 'el',
+  entries: 'es',
   exports: 'ex',
   file: 'f',
+  found: 'fd',
   imports: 'im',
   is_default: 'id',
   is_star: 'is',
   is_type: 'it',
+  key: 'ke',
   kind: 'k',
   language: 'lg',
+  length: 'ln',
+  limit: 'lm',
   line: 'l',
   lines: 'ls',
   match: 'm',
@@ -44,6 +50,7 @@ const KEY_MAP: Record<string, string> = {
   outline: 'o',
   path: 'p',
   payload: 'pl',
+  preview: 'pr',
   results: 'r',
   scope: 'sc',
   signature: 's',
@@ -54,6 +61,8 @@ const KEY_MAP: Record<string, string> = {
   tokens: 't',
   truncated: 'tr',
   type: 'ty',
+  value: 'v',
+  value_kind: 'vk',
 };
 
 /** Reverse-map exported for tests/debug. */
