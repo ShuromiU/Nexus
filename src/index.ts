@@ -71,6 +71,7 @@ export type {
   DiffOutlineEntry, DiffOutlineFile, DiffOutlineResult,
   SignatureResult, UnusedExportResult, DocResult,
   BatchSubResult, BatchResult,
+  StructuredQueryResult, StructuredOutlineEntry, StructuredOutlineFileResult, StructuredValueKind,
 } from './query/engine.js';
 export { compactify, compactifyValue, maybeCompactify, COMPACT_KEY_MAP } from './query/compact.js';
 export { fuzzyScore, rankResults } from './query/ranking.js';

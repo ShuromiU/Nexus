@@ -9,6 +9,12 @@ import type { LanguageCapabilities } from '../analysis/languages/registry.js';
 import { extractSource } from '../analysis/extractor.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
+import { classifyPath } from '../workspace/classify.js';
+import {
+  loadPackageJson, loadTsconfig, loadGenericJson,
+  loadGhaWorkflow, loadGenericYaml,
+  loadCargoToml, loadGenericToml,
+} from '../analysis/documents/index.js';
 
 // ── Result Types ──────────────────────────────────────────────────────
 
@@ -34,7 +40,9 @@ export type NexusResultType =
   | 'unused_exports'
   | 'kind_index'
   | 'doc'
-  | 'batch';
+  | 'batch'
+  | 'structured_query'
+  | 'structured_outline';
 
 export interface NexusResult<T> {
   query: string;
@@ -286,6 +294,33 @@ export interface BatchSubResult {
 
 export interface BatchResult {
   results: BatchSubResult[];
+}
+
+export interface StructuredQueryResult {
+  file: string;
+  path: string;
+  kind: string;
+  found: boolean;
+  value?: unknown;
+  error?: string;
+  limit?: number;
+  actual?: number;
+}
+
+export type StructuredValueKind = 'string' | 'number' | 'boolean' | 'null' | 'array' | 'object';
+
+export interface StructuredOutlineEntry {
+  key: string;
+  value_kind: StructuredValueKind;
+  preview?: string;
+  length?: number;
+}
+
+export interface StructuredOutlineFileResult {
+  file: string;
+  kind: string;
+  entries: StructuredOutlineEntry[];
+  error?: string;
 }
 
 // ── Query Engine ──────────────────────────────────────────────────────
@@ -1792,6 +1827,84 @@ export class QueryEngine {
   }
 
   /**
+   * Read a structured file and extract the value at a dotted path.
+   * Path syntax: dotted keys; numeric segments index into arrays.
+   *   "scripts.test", "dependencies.react", "jobs.test.steps.0.run"
+   * Keys containing dots are not supported; use structuredOutline to confirm structure.
+   */
+  structuredQuery(filePath: string, queryPath: string): NexusResult<StructuredQueryResult> {
+    const start = performance.now();
+    const root = this.store.getMeta('root_path') ?? '';
+    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(root, filePath);
+    const basename = path.basename(filePath);
+    const rel = root ? normalizePath(path.relative(root, absPath)) : normalizePath(filePath);
+    const kind = classifyPath(rel, basename, { languages: {} });
+
+    const make = (r: Partial<StructuredQueryResult>): NexusResult<StructuredQueryResult> => {
+      const result: StructuredQueryResult = {
+        file: filePath, path: queryPath, kind: kind.kind, found: false, ...r,
+      };
+      return this.wrap('structured_query', `structured_query ${filePath} ${queryPath}`, [result], start);
+    };
+
+    const loaded = loadStructuredFile(absPath, kind.kind);
+    if (loaded === null) return make({ error: 'not a structured file' });
+    const err = asLoadError(loaded);
+    if (err) {
+      return make({
+        error: err.error,
+        ...(err.limit !== undefined ? { limit: err.limit } : {}),
+        ...(err.actual !== undefined ? { actual: err.actual } : {}),
+      });
+    }
+
+    const value = resolveDottedPath(loaded, queryPath);
+    if (value === undefined) return make({ found: false });
+    return make({ found: true, value });
+  }
+
+  /**
+   * Read a structured file and list its top-level keys with value kinds.
+   * Shallow only — no recursion, no line anchors (V3 spec defers anchors).
+   */
+  structuredOutline(filePath: string): NexusResult<StructuredOutlineFileResult> {
+    const start = performance.now();
+    const root = this.store.getMeta('root_path') ?? '';
+    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(root, filePath);
+    const basename = path.basename(filePath);
+    const rel = root ? normalizePath(path.relative(root, absPath)) : normalizePath(filePath);
+    const kind = classifyPath(rel, basename, { languages: {} });
+
+    const make = (r: Partial<StructuredOutlineFileResult>): NexusResult<StructuredOutlineFileResult> => {
+      const result: StructuredOutlineFileResult = {
+        file: filePath, kind: kind.kind, entries: [], ...r,
+      };
+      return this.wrap('structured_outline', `structured_outline ${filePath}`, [result], start);
+    };
+
+    const loaded = loadStructuredFile(absPath, kind.kind);
+    if (loaded === null) return make({ error: 'not a structured file' });
+    const err = asLoadError(loaded);
+    if (err) return make({ error: err.error });
+
+    if (loaded === undefined || loaded === null || typeof loaded !== 'object') {
+      return make({ error: 'root is not a mapping' });
+    }
+
+    const entries: StructuredOutlineEntry[] = [];
+    if (Array.isArray(loaded)) {
+      for (let i = 0; i < loaded.length; i++) {
+        entries.push(describeEntry(String(i), loaded[i]));
+      }
+    } else {
+      for (const [k, v] of Object.entries(loaded as Record<string, unknown>)) {
+        entries.push(describeEntry(k, v));
+      }
+    }
+    return make({ entries });
+  }
+
+  /**
    * Wrap results in the NexusResult envelope.
    */
   private wrap<T>(
@@ -1925,4 +2038,91 @@ function getSlicePreferenceScore(
   if (symbol.file_id === rootFileId) return 0;
   if (importedFileIds.has(symbol.file_id)) return 1;
   return 2;
+}
+
+/**
+ * Dispatch to the right A2 loader based on FileKind. Returns:
+ *   - parsed value on success (object / array / scalar / null)
+ *   - `{ error, limit?, actual? }` on loader error
+ *   - `null` if the kind isn't a supported structured file
+ */
+function loadStructuredFile(absPath: string, kindStr: string): unknown {
+  switch (kindStr) {
+    case 'package_json': return loadPackageJson(absPath);
+    case 'tsconfig_json': return loadTsconfig(absPath);
+    case 'cargo_toml': return loadCargoToml(absPath);
+    case 'gha_workflow': return loadGhaWorkflow(absPath);
+    case 'json_generic': return loadGenericJson(absPath);
+    case 'yaml_generic': return loadGenericYaml(absPath);
+    case 'toml_generic': return loadGenericToml(absPath);
+    default: return null;
+  }
+}
+
+/** Narrow a loader return to an error object if it is one. */
+function asLoadError(v: unknown): { error: string; limit?: number; actual?: number } | null {
+  if (!v || typeof v !== 'object') return null;
+  const obj = v as Record<string, unknown>;
+  if (typeof obj.error !== 'string') return null;
+  const out: { error: string; limit?: number; actual?: number } = { error: obj.error };
+  if (typeof obj.limit === 'number') out.limit = obj.limit;
+  if (typeof obj.actual === 'number') out.actual = obj.actual;
+  return out;
+}
+
+/**
+ * Walk a dotted path ("a.b.0.c") into a parsed structured value.
+ * Numeric segments index into arrays when the current node is an array.
+ * Returns undefined on any missing step.
+ */
+function resolveDottedPath(root: unknown, dotted: string): unknown {
+  const parts = dotted.split('.').filter(p => p.length > 0);
+  let cur: unknown = root;
+  for (const p of parts) {
+    if (cur === null || cur === undefined) return undefined;
+    if (Array.isArray(cur)) {
+      const idx = Number(p);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= cur.length) return undefined;
+      cur = cur[idx];
+    } else if (typeof cur === 'object') {
+      cur = (cur as Record<string, unknown>)[p];
+    } else {
+      return undefined;
+    }
+  }
+  return cur;
+}
+
+function describeEntry(key: string, value: unknown): StructuredOutlineEntry {
+  const kind = valueKind(value);
+  const entry: StructuredOutlineEntry = { key, value_kind: kind };
+  if (kind === 'array' && Array.isArray(value)) entry.length = value.length;
+  const preview = makePreview(value, kind);
+  if (preview !== null) entry.preview = preview;
+  return entry;
+}
+
+function valueKind(v: unknown): StructuredValueKind {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'array';
+  const t = typeof v;
+  if (t === 'string' || t === 'number' || t === 'boolean') return t;
+  if (t === 'object') return 'object';
+  return 'null';
+}
+
+function makePreview(v: unknown, kind: StructuredValueKind): string | null {
+  switch (kind) {
+    case 'string': {
+      const s = v as string;
+      return JSON.stringify(s.length > 78 ? s.slice(0, 75) + '...' : s);
+    }
+    case 'number':
+    case 'boolean':
+    case 'null':
+      return JSON.stringify(v);
+    case 'array':
+    case 'object':
+      return null;
+  }
 }

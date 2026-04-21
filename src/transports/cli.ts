@@ -829,6 +829,36 @@ export function createProgram(): Command {
       }
     });
 
+  program
+    .command('structured-query <file> <path>')
+    .description('Extract a value from a structured config file by dotted path (e.g. "compilerOptions.strict")')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((file: string, queryPath: string, opts: { pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.structuredQuery(file, queryPath);
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
+    .command('structured-outline <file>')
+    .description('List top-level keys of a structured config file with value kinds')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((file: string, opts: { pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.structuredOutline(file);
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
   // ── serve ──────────────────────────────────────────────────────────
 
   program

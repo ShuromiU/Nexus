@@ -74,6 +74,8 @@ TypeScript/JavaScript (.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs), Python, Go, Rust,
 
 **New token-savers:** `nexus_callers`, `nexus_pack`, `nexus_changed`, `nexus_diff_outline`, `nexus_signatures`, `nexus_definition_at`, `nexus_unused_exports`, `nexus_kind_index`, `nexus_doc`, `nexus_batch`
 
+**Structured files (A3):** `nexus_structured_query`, `nexus_structured_outline`
+
 Every tool accepts an optional `compact: true` flag that returns a minimal-key envelope (~50% smaller payload) — drops `query`/`timing_ms`/`index_status` and renames result keys to single letters.
 
 ### High-Token-Savings Tools
@@ -97,3 +99,7 @@ Every tool accepts an optional `compact: true` flag that returns a minimal-key e
 - **`nexus_kind_index(kind, path?, limit?)`** — Every symbol of a given kind (`interface`, `class`, `component`, `hook`, …) under an optional path prefix. Replaces grep/search chains for "show me every X in this folder".
 - **`nexus_doc(name, file?)`** — Just the docstring(s). Tiny but hot path — avoids reading source bodies when you only need the comment block.
 - **`nexus_batch(calls[])`** — Run several Nexus tools in a single MCP roundtrip. `calls` is an array of `{tool, args}`. Saves protocol/envelope overhead when you already know you need N related queries. Each sub-call's `args` may include its own `compact:true`; the top-level `compact:true` applies to all sub-results.
+
+### Structured File Tools (A3)
+- **`nexus_structured_query(file, path)`** — Extract one value from a structured config file (package.json, tsconfig, Cargo.toml, GHA workflow, generic JSON/YAML/TOML) by dotted path. Numeric segments index arrays: `jobs.test.steps.0.run`. Returns `{ found, value, ... }`. Errors surface with `error`; oversized files return `error: 'file_too_large'` with `limit`/`actual`.
+- **`nexus_structured_outline(file)`** — Shallow top-level view of a structured config file: each entry has `key`, `value_kind`, short `preview` for scalars, `length` for arrays. No line anchors in V3.
