@@ -1,3 +1,20 @@
+## [Unreleased] — structured document MCP tools (A3 P0+P1)
+
+### Added
+- `nexus_structured_query(file, path)` — extract a single value from a structured config file. Dotted path syntax; numeric segments index arrays. Supported kinds: `package.json`, `tsconfig*.json`, `Cargo.toml`, GHA workflows (P0), generic JSON/YAML/TOML (P1).
+- `nexus_structured_outline(file)` — list top-level keys with value kinds (string / number / boolean / null / array / object), short previews for scalars, array lengths for arrays. Same supported kinds as `structured_query`.
+- CLI: `nexus structured-query <file> <path>` and `nexus structured-outline <file>`.
+- Public re-exports: `StructuredQueryResult`, `StructuredOutlineEntry`, `StructuredOutlineFileResult`, `StructuredValueKind`.
+
+### Notes
+- No line anchors — V3 defers anchor support until a location-preserving parser set is chosen.
+- `nexus_lockfile_deps` (P2) deferred per the V3 spec's "may defer" clause.
+- Structured file lookup is by exact path (relative to `root_path` or absolute). Structured files are not indexed; no fuzzy matching.
+- Parse and fs errors surface as `{ error, ... }` on the single result; `file_too_large` errors include `limit` and `actual` bytes.
+- Compact-mode keys added for the new shapes (`fd`, `v`, `es`, `ke`, `vk`, `pr`, `ln`, `lm`, `ac`).
+
+---
+
 ## [Unreleased] — document cache + per-format size caps (A2)
 
 ### Added
