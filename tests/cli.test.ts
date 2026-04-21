@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
   createProgram,
@@ -9,6 +10,10 @@ import {
   formatBatchOutline,
   formatSlice,
 } from '../src/transports/cli.js';
+
+const pkg = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { version: string };
 import type {
   SymbolResult,
   OccurrenceResult,
@@ -66,7 +71,7 @@ describe('CLI argument parsing', () => {
   it('has correct name and version', () => {
     const program = createProgram();
     expect(program.name()).toBe('nexus');
-    expect(program.version()).toBe('0.1.0');
+    expect(program.version()).toBe(pkg.version);
   });
 });
 
