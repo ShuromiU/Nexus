@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import {
   loadPackageJson, loadTsconfig, loadGenericJson,
   loadGhaWorkflow, loadGenericYaml, loadCargoToml, loadGenericToml,
+  loadYarnLock,
 } from '../src/analysis/documents/loaders.js';
 import { resetDocumentCache } from '../src/analysis/documents/cache.js';
 
@@ -197,5 +198,32 @@ describe('loadGenericToml', () => {
     const p = write('big.toml', big);
     const r = loadGenericToml(p);
     expect(r && typeof r === 'object' && 'error' in (r as object)).toBe(true);
+  });
+});
+
+describe('loadYarnLock', () => {
+  it('reads and parses a yarn v1 lockfile', () => {
+    const src = `# yarn lockfile v1
+
+"react@^18.0.0":
+  version "18.2.0"
+
+"@types/node@^20.0.0":
+  version "20.10.5"
+`;
+    const p = write('yarn.lock', src);
+    const r = loadYarnLock(p);
+    if ('error' in r) throw new Error(r.error);
+    expect(r.entries).toContainEqual({ name: 'react', version: '18.2.0' });
+    expect(r.entries).toContainEqual({ name: '@types/node', version: '20.10.5' });
+  });
+
+  it('enforces the 20 MB cap', () => {
+    const padding = 'x'.repeat(21 * 1024 * 1024);
+    const p = write('yarn.lock', padding);
+    const r = loadYarnLock(p);
+    if (!('error' in r)) throw new Error('should have errored');
+    expect(r.error).toBe('file_too_large');
+    if ('limit' in r) expect(r.limit).toBe(20 * 1024 * 1024);
   });
 });

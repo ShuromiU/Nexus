@@ -6,6 +6,7 @@ import { parseGhaWorkflow, type ParsedGhaWorkflow } from './gha-workflow.js';
 import { parseGenericYaml } from './generic-yaml.js';
 import { parseCargoToml, type ParsedCargoToml } from './cargo-toml.js';
 import { parseGenericToml } from './generic-toml.js';
+import { parseYarnLock, type ParsedYarnLock } from './yarn-lock.js';
 import { getDocumentCache } from './cache.js';
 
 export const SIZE_CAPS = {
@@ -83,4 +84,8 @@ export function loadCargoToml(absPath: string): ParsedCargoToml | LoadError {
 
 export function loadGenericToml(absPath: string): unknown | LoadError {
   return loadCached(absPath, SIZE_CAPS.toml_generic, parseGenericToml);
+}
+
+export function loadYarnLock(absPath: string): ParsedYarnLock | LoadError {
+  return loadCached(absPath, SIZE_CAPS.yarn_lock, parseYarnLock);
 }
