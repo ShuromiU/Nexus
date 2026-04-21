@@ -18,3 +18,17 @@ export { parseGenericToml } from './generic-toml.js';
 
 export { parseYarnLock } from './yarn-lock.js';
 export type { ParsedYarnLock } from './yarn-lock.js';
+
+// Loaders (A2) — read + size-cap + parse + cache.
+export {
+  loadPackageJson, loadTsconfig, loadGenericJson,
+  loadGhaWorkflow, loadGenericYaml,
+  loadCargoToml, loadGenericToml,
+  loadYarnLock,
+  SIZE_CAPS,
+} from './loaders.js';
+export type { LoadError } from './loaders.js';
+export {
+  getDocumentCache, resetDocumentCache, DocumentCache,
+} from './cache.js';
+export type { CacheOptions } from './cache.js';

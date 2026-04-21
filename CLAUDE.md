@@ -15,7 +15,7 @@ src/
   workspace/       — File discovery, ignore rules, change detection, file-kind classification
   analysis/        — Tree-sitter parsing + per-language symbol extractors
     languages/     — Adapters: typescript, python, go, rust, java, csharp, css
-    documents/     — Structured-file parsers: package.json, tsconfig, Cargo.toml, GHA YAML, lockfiles (consumed by A3 tools)
+    documents/     — Structured-file parsers + fs-aware loaders (size caps + LRU cache). Consumed by A3.
     registry.ts    — Adapter registration (side-effect imports in entry points)
   db/              — SQLite schema, store (all DB ops), integrity checks
   index/           — Two-phase orchestrator (scan+parse → atomic publish), lock

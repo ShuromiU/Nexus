@@ -1,3 +1,16 @@
+## [Unreleased] — document cache + per-format size caps (A2)
+
+### Added
+- `src/analysis/documents/cache.ts` — `DocumentCache` LRU (64 entries / 8 MB), module singleton via `getDocumentCache()`. Keyed on `(absPath, mtimeMs, size)`; no content hashing on the fast path.
+- `src/analysis/documents/loaders.ts` — `loadPackageJson`, `loadTsconfig`, `loadGenericJson`, `loadGhaWorkflow`, `loadGenericYaml`, `loadCargoToml`, `loadGenericToml`, `loadYarnLock`. Each enforces a per-format byte cap before parse; over-cap returns `{ error: 'file_too_large', limit, actual }`.
+- Per-format size caps (`SIZE_CAPS`): 1 MB for `package.json` / `tsconfig.json` / `Cargo.toml` / GHA workflows; 5 MB for generic JSON/YAML/TOML; 20 MB for `yarn.lock`.
+
+### Notes
+- Pure infrastructure for A3. No new MCP tools, no CLI surface. Parsers themselves are unchanged.
+- Parse errors are cached alongside successes — same malformed input yields the same error without re-parsing.
+
+---
+
 ## [Unreleased] — classifyPath + document parsers (A1)
 
 ### Added

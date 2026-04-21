@@ -42,6 +42,19 @@ export type {
   ParsedPackageJson, ParsedTsconfig, ParsedGhaWorkflow, ParsedCargoToml, ParsedYarnLock,
 } from './analysis/documents/index.js';
 
+// Document loaders + cache (A2) — fs-aware, size-capped, cached.
+export {
+  loadPackageJson, loadTsconfig, loadGenericJson,
+  loadGhaWorkflow, loadGenericYaml,
+  loadCargoToml, loadGenericToml,
+  loadYarnLock,
+  SIZE_CAPS,
+  getDocumentCache, resetDocumentCache, DocumentCache,
+} from './analysis/documents/index.js';
+export type {
+  LoadError, CacheOptions,
+} from './analysis/documents/index.js';
+
 // Index orchestrator
 export { runIndex } from './index/orchestrator.js';
 export type { IndexResult } from './index/orchestrator.js';
