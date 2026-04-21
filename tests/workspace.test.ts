@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import { loadConfig, computeConfigHash } from '../src/config.js';
 import { detectRoot, detectCaseSensitivity, getGitHead } from '../src/workspace/detector.js';
 import { buildIgnoreMatcher } from '../src/workspace/ignores.js';
-import { scanDirectory, buildExtraExtensions } from '../src/workspace/scanner.js';
+import { scanDirectory } from '../src/workspace/scanner.js';
 import { detectChanges, hashFile, summarizeChanges } from '../src/workspace/changes.js';
 import type { ScannedFile } from '../src/workspace/scanner.js';
 import type { FileRow } from '../src/db/store.js';
@@ -230,6 +230,7 @@ describe('Scanner', () => {
     const files = scanDirectory(dir, matcher, {
       maxFileSize: 1_048_576,
       minifiedLineLength: 500,
+      languages: {},
     });
 
     const languages = files.map(f => f.language).sort();
@@ -248,6 +249,7 @@ describe('Scanner', () => {
     const files = scanDirectory(dir, matcher, {
       maxFileSize: 1_048_576,
       minifiedLineLength: 500,
+      languages: {},
     });
 
     expect(files).toHaveLength(1);
@@ -263,6 +265,7 @@ describe('Scanner', () => {
     const files = scanDirectory(dir, matcher, {
       maxFileSize: 1000, // 1KB limit
       minifiedLineLength: 500,
+      languages: {},
     });
 
     expect(files).toHaveLength(1);
@@ -278,6 +281,7 @@ describe('Scanner', () => {
     const files = scanDirectory(dir, matcher, {
       maxFileSize: 1_048_576,
       minifiedLineLength: 500,
+      languages: {},
     });
 
     const paths = files.map(f => f.path).sort();
@@ -293,21 +297,12 @@ describe('Scanner', () => {
     const files = scanDirectory(dir, matcher, {
       maxFileSize: 1_048_576,
       minifiedLineLength: 500,
+      languages: {},
     });
 
     expect(files).toHaveLength(1);
     expect(files[0].size).toBe(Buffer.byteLength(content));
     expect(files[0].mtime).toBeGreaterThan(0);
-  });
-
-  it('builds extra extensions from config', () => {
-    const extra = buildExtraExtensions({
-      prisma: { extensions: ['.prisma'] },
-      graphql: { extensions: ['graphql', '.gql'] },
-    });
-    expect(extra['.prisma']).toBe('prisma');
-    expect(extra['.graphql']).toBe('graphql');
-    expect(extra['.gql']).toBe('graphql');
   });
 
   it('uses extra extensions in scan', () => {
@@ -317,7 +312,7 @@ describe('Scanner', () => {
     const files = scanDirectory(dir, matcher, {
       maxFileSize: 1_048_576,
       minifiedLineLength: 500,
-      extraExtensions: { '.prisma': 'prisma' },
+      languages: { prisma: { extensions: ['.prisma'] } },
     });
 
     expect(files).toHaveLength(1);

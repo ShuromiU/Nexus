@@ -10,8 +10,10 @@ export type { NexusConfig } from './config.js';
 export { detectRoot, detectCaseSensitivity, getGitHead } from './workspace/detector.js';
 export { buildIgnoreMatcher } from './workspace/ignores.js';
 export type { IgnoreMatcher } from './workspace/ignores.js';
-export { scanDirectory, buildExtraExtensions } from './workspace/scanner.js';
+export { scanDirectory } from './workspace/scanner.js';
 export type { ScannedFile, ScanOptions } from './workspace/scanner.js';
+export { classifyPath, DEFAULT_EXTENSIONS } from './workspace/classify.js';
+export type { FileKind, ClassifyConfig } from './workspace/classify.js';
 export { detectChanges, hashFile, summarizeChanges } from './workspace/changes.js';
 export type { FileChange } from './workspace/changes.js';
 
@@ -28,6 +30,17 @@ import './analysis/languages/go.js';
 import './analysis/languages/rust.js';
 import './analysis/languages/java.js';
 import './analysis/languages/csharp.js';
+
+// Document parsers (structured config / lockfile helpers — consumed by A3)
+export {
+  parsePackageJson, parseTsconfig, parseGenericJson,
+  parseGhaWorkflow, parseGenericYaml,
+  parseCargoToml, parseGenericToml,
+  parseYarnLock,
+} from './analysis/documents/index.js';
+export type {
+  ParsedPackageJson, ParsedTsconfig, ParsedGhaWorkflow, ParsedCargoToml, ParsedYarnLock,
+} from './analysis/documents/index.js';
 
 // Index orchestrator
 export { runIndex } from './index/orchestrator.js';
