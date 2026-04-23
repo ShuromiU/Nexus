@@ -15,6 +15,9 @@ import { compactify } from '../query/compact.js';
 import { runIndex } from '../index/orchestrator.js';
 import { detectRoot } from '../workspace/detector.js';
 import type Database from 'better-sqlite3';
+import { dispatchPolicy } from '../policy/dispatcher.js';
+import { DEFAULT_RULES } from '../policy/index.js';
+import type { PolicyEvent } from '../policy/types.js';
 
 // Side-effect: register all language adapters
 import '../analysis/languages/typescript.js';
@@ -514,6 +517,30 @@ export function createMcpServer(): Server {
             required: ['file'],
           },
         },
+        {
+          name: 'nexus_policy_check',
+          description:
+            'Evaluate the Nexus policy layer against a hook event. Fallback for platforms without PreToolUse hook support; otherwise hook dispatchers should call the nexus-policy-check bin directly. Does NOT trigger a reindex — responses carry stale_hint.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              event: {
+                type: 'object',
+                description: 'Claude Code hook event payload',
+                properties: {
+                  hook_event_name: { type: 'string' },
+                  tool_name: { type: 'string' },
+                  tool_input: { type: 'object' },
+                  session_id: { type: 'string' },
+                  cwd: { type: 'string' },
+                },
+                required: ['tool_name', 'tool_input'],
+              },
+              ...COMPACT_PROP,
+            },
+            required: ['event'],
+          },
+        },
       ],
     };
   });
@@ -604,6 +631,20 @@ export function createMcpServer(): Server {
         return qe.structuredQuery(args.file as string, args.path as string);
       case 'nexus_structured_outline':
         return qe.structuredOutline(args.file as string);
+      case 'nexus_policy_check': {
+        const event = args.event as PolicyEvent;
+        const rootDir = indexRootDir ?? process.cwd();
+        const response = dispatchPolicy(event, { rootDir, rules: DEFAULT_RULES });
+        return {
+          type: 'policy_check',
+          query: `policy_check ${event.tool_name}`,
+          results: [response],
+          count: 1,
+          index_status: 'current',
+          index_health: 'ok',
+          timing_ms: 0,
+        };
+      }
       default:
         throw new Error(`Unknown tool: ${toolName}`);
     }
@@ -621,6 +662,22 @@ export function createMcpServer(): Server {
         const result = runIndex(indexRootDir);
         lastFreshnessCheck = Date.now();
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+
+      if (name === 'nexus_policy_check') {
+        const event = args.event as PolicyEvent;
+        const rootDir = indexRootDir ?? process.cwd();
+        const response = dispatchPolicy(event, { rootDir, rules: DEFAULT_RULES });
+        const result: NexusResult<unknown> = {
+          type: 'policy_check',
+          query: `policy_check ${event.tool_name}`,
+          results: [response],
+          count: 1,
+          index_status: 'current',
+          index_health: 'ok',
+          timing_ms: 0,
+        };
+        return respond(result, compact);
       }
 
       // Auto-refresh if stale (>30s since last check)

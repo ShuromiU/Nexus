@@ -81,6 +81,21 @@ async function getRegisteredTools(): Promise<Array<{ name: string; inputSchema: 
   return result.tools;
 }
 
+async function callTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ content: { type: string; text: string }[]; isError?: boolean }> {
+  const server = createMcpServer();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handlers = (server as any)._requestHandlers as Map<
+    string,
+    (req: unknown, extra: unknown) => Promise<{ content: { type: string; text: string }[]; isError?: boolean }>
+  >;
+  const handler = handlers.get('tools/call');
+  if (!handler) throw new Error('tools/call handler not registered');
+  return handler({ method: 'tools/call', params: { name, arguments: args } }, {});
+}
+
 describe('MCP server', () => {
   it('creates server without errors', () => {
     const server = createMcpServer();
@@ -344,5 +359,45 @@ describe('MCP response shapes', () => {
       const serialized = JSON.stringify(result, null, 2);
       expect(() => JSON.parse(serialized)).not.toThrow();
     }
+  });
+});
+
+describe('nexus_policy_check tool', () => {
+  it('is listed in tools/list', async () => {
+    const tools = await getRegisteredTools();
+    expect(tools.find(t => t.name === 'nexus_policy_check')).toBeDefined();
+  });
+
+  it('has event in required schema properties', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_policy_check');
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    expect(schema.properties).toHaveProperty('event');
+    expect(schema.required).toEqual(expect.arrayContaining(['event']));
+  });
+
+  it('dispatches a Grep-on-code event and returns a deny decision', async () => {
+    const result = await callTool('nexus_policy_check', {
+      event: {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Grep',
+        tool_input: { pattern: 'foo' },
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.results[0].decision).toBe('deny');
+    expect(typeof payload.results[0].stale_hint).toBe('boolean');
+  });
+
+  it('returns allow for a non-Grep event', async () => {
+    const result = await callTool('nexus_policy_check', {
+      event: {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: 'README.md' },
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.results[0].decision).toBe('allow');
   });
 });

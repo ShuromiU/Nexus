@@ -42,7 +42,8 @@ export type NexusResultType =
   | 'doc'
   | 'batch'
   | 'structured_query'
-  | 'structured_outline';
+  | 'structured_outline'
+  | 'policy_check';
 
 export interface NexusResult<T> {
   query: string;
