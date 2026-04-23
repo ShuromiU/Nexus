@@ -4,7 +4,7 @@ import type { PolicyEvent, PolicyResponse, PolicyRule } from './types.js';
 
 export interface DispatchOptions {
   rootDir: string;
-  rules: PolicyRule[];
+  rules: readonly PolicyRule[];
 }
 
 /**
@@ -54,7 +54,8 @@ function extractTouchedPath(event: PolicyEvent, rootDir: string): string | undef
   for (const key of candidates) {
     const v = input[key];
     if (typeof v === 'string' && v.length > 0) {
-      return path.isAbsolute(v) ? v : path.resolve(rootDir, v);
+      const normalized = v.replace(/\\/g, '/');
+      return path.isAbsolute(normalized) ? normalized : path.resolve(rootDir, normalized);
     }
   }
   return undefined;

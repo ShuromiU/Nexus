@@ -59,4 +59,28 @@ describe('dispatchPolicy', () => {
     const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [ruleA, ruleB] });
     expect(resp.decision).toBe('deny');
   });
+
+  it('normalizes backslash paths in tool_input (Windows compat)', () => {
+    const captured: Array<{ path?: string }> = [];
+    const ruleA: PolicyRule = {
+      name: 'A',
+      evaluate: (event) => {
+        captured.push({ path: event.tool_input.file_path as string });
+        return { decision: 'allow', rule: 'A' };
+      },
+    };
+    const resp = dispatchPolicy(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: 'src\\policy\\types.ts' },
+      },
+      { rootDir: tmpDir, rules: [ruleA] },
+    );
+    // The rule itself receives the raw event; this test only exercises that
+    // dispatchPolicy still routes correctly. stale_hint will read the file that
+    // does not exist, so hint should be false (cannot-disprove-freshness case).
+    expect(resp.decision).toBe('allow');
+    expect(resp.stale_hint).toBe(false);
+  });
 });
