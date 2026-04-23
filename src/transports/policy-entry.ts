@@ -82,4 +82,7 @@ function main(): void {
   process.stdout.write(JSON.stringify(response));
 }
 
-main();
+const isDirectRun = process.argv[1]?.replace(/\\/g, '/').endsWith('transports/policy-entry.js')
+  || process.argv[1]?.replace(/\\/g, '/').endsWith('transports/policy-entry.ts');
+
+if (isDirectRun) main();
