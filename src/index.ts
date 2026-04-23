@@ -85,3 +85,13 @@ export {
 
 // MCP server
 export { createMcpServer, startServer } from './transports/mcp.js';
+
+// Policy primitives
+export type {
+  PolicyEvent,
+  PolicyDecision,
+  PolicyResponse,
+  PolicyContext,
+  PolicyRule,
+} from './policy/types.js';
+export { dispatchPolicy, DEFAULT_RULES, computeStaleHint } from './policy/index.js';
