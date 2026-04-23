@@ -1,5 +1,11 @@
-import { readFileSync } from 'node:fs';
-import { describe, it, expect } from 'vitest';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { applySchema, initializeMeta } from '../src/db/schema.js';
+import { QueryEngine } from '../src/query/engine.js';
+import { resetDocumentCache } from '../src/analysis/documents/cache.js';
 import {
   createProgram,
   formatSymbols,
@@ -44,6 +50,7 @@ describe('CLI argument parsing', () => {
     expect(commandNames).toContain('deps');
     expect(commandNames).toContain('stats');
     expect(commandNames).toContain('repair');
+    expect(commandNames).toContain('lockfile-deps');
     expect(commandNames).toContain('serve');
   });
 
@@ -407,6 +414,61 @@ describe('formatSlice', () => {
     expect(output).toContain('Other matches:');
     expect(output).toContain('src/other.ts:5:0');
     expect(output).toContain('Output truncated.');
+  });
+});
+
+// ── lockfile-deps command ─────────────────────────────────────────────
+
+describe('lockfile-deps command', () => {
+  let tmp: string;
+  let db: Database.Database;
+  let engine: QueryEngine;
+
+  beforeEach(() => {
+    resetDocumentCache();
+    tmp = mkdtempSync(join(tmpdir(), 'nexus-cli-lockfile-'));
+    db = new Database(':memory:');
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    applySchema(db);
+    initializeMeta(db, tmp, true);
+    engine = new QueryEngine(db);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmp, { recursive: true, force: true });
+    resetDocumentCache();
+  });
+
+  it('is registered as a command', () => {
+    const program = createProgram();
+    const commandNames = program.commands.map(c => c.name());
+    expect(commandNames).toContain('lockfile-deps');
+  });
+
+  it('lockfile-deps command has --pretty option', () => {
+    const program = createProgram();
+    const cmd = program.commands.find(c => c.name() === 'lockfile-deps')!;
+    expect(cmd).toBeDefined();
+    const prettyOpt = cmd.options.find(o => o.long === '--pretty');
+    expect(prettyOpt).toBeDefined();
+  });
+
+  it('returns type lockfile_deps and react entry from yarn.lock', () => {
+    const lockfile = `# yarn lockfile v1\n"react@^18.0.0":\n  version "18.2.0"\n`;
+    writeFileSync(join(tmp, 'yarn.lock'), lockfile);
+    const result = engine.lockfileDeps('yarn.lock');
+    expect(result.type).toBe('lockfile_deps');
+    expect(result.results[0].entries[0].name).toBe('react');
+    expect(result.results[0].entries[0].version).toBe('18.2.0');
+  });
+
+  it('filters by name when name arg is provided', () => {
+    const lockfile = `# yarn lockfile v1\n"react@^18.0.0":\n  version "18.2.0"\n\n"lodash@^4.17.0":\n  version "4.17.21"\n`;
+    writeFileSync(join(tmp, 'yarn.lock'), lockfile);
+    const result = engine.lockfileDeps('yarn.lock', 'react');
+    expect(result.results[0].entries).toEqual([{ name: 'react', version: '18.2.0' }]);
   });
 });
 
