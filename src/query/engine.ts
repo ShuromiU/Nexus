@@ -14,6 +14,7 @@ import {
   loadPackageJson, loadTsconfig, loadGenericJson,
   loadGhaWorkflow, loadGenericYaml,
   loadCargoToml, loadGenericToml,
+  loadYarnLock, loadPackageLock, loadPnpmLock, loadCargoLock,
 } from '../analysis/documents/index.js';
 
 // ── Result Types ──────────────────────────────────────────────────────
@@ -43,6 +44,7 @@ export type NexusResultType =
   | 'batch'
   | 'structured_query'
   | 'structured_outline'
+  | 'lockfile_deps'
   | 'policy_check';
 
 export interface NexusResult<T> {
@@ -322,6 +324,15 @@ export interface StructuredOutlineFileResult {
   kind: string;
   entries: StructuredOutlineEntry[];
   error?: string;
+}
+
+export interface LockfileDepsResult {
+  file: string;
+  kind: string;
+  entries: { name: string; version: string }[];
+  error?: string;
+  limit?: number;
+  actual?: number;
 }
 
 // ── Query Engine ──────────────────────────────────────────────────────
@@ -1906,6 +1917,47 @@ export class QueryEngine {
   }
 
   /**
+   * List `{name, version}` entries from a lockfile. Supported kinds:
+   *   - yarn.lock
+   *   - package-lock.json (lockfileVersion 1/2/3)
+   *   - pnpm-lock.yaml (v6+ and legacy v5 keys)
+   *   - Cargo.lock
+   *
+   * If `name` is provided, entries are filtered to exact matches (multiple
+   * versions of the same package are preserved).
+   */
+  lockfileDeps(filePath: string, name?: string): NexusResult<LockfileDepsResult> {
+    const start = performance.now();
+    const root = this.store.getMeta('root_path') ?? '';
+    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(root, filePath);
+    const basename = path.basename(filePath);
+    const rel = root ? normalizePath(path.relative(root, absPath)) : normalizePath(filePath);
+    const kind = classifyPath(rel, basename, { languages: {} });
+
+    const make = (r: Partial<LockfileDepsResult>): NexusResult<LockfileDepsResult> => {
+      const result: LockfileDepsResult = {
+        file: filePath, kind: kind.kind, entries: [], ...r,
+      };
+      return this.wrap('lockfile_deps', `lockfile_deps ${filePath}${name ? ' ' + name : ''}`, [result], start);
+    };
+
+    const loaded = loadLockfile(absPath, kind.kind);
+    if (loaded === null) return make({ error: 'not a lockfile' });
+    const err = asLoadError(loaded);
+    if (err) {
+      return make({
+        error: err.error,
+        ...(err.limit !== undefined ? { limit: err.limit } : {}),
+        ...(err.actual !== undefined ? { actual: err.actual } : {}),
+      });
+    }
+
+    const entries = (loaded as { entries: { name: string; version: string }[] }).entries;
+    const filtered = name ? entries.filter(e => e.name === name) : entries;
+    return make({ entries: filtered });
+  }
+
+  /**
    * Wrap results in the NexusResult envelope.
    */
   private wrap<T>(
@@ -2056,6 +2108,22 @@ function loadStructuredFile(absPath: string, kindStr: string): unknown {
     case 'json_generic': return loadGenericJson(absPath);
     case 'yaml_generic': return loadGenericYaml(absPath);
     case 'toml_generic': return loadGenericToml(absPath);
+    default: return null;
+  }
+}
+
+/**
+ * Dispatch to the right lockfile loader based on FileKind. Returns:
+ *   - ParsedXxxLock on success
+ *   - `{ error, limit?, actual? }` on loader error
+ *   - `null` if the kind isn't a supported lockfile
+ */
+function loadLockfile(absPath: string, kindStr: string): unknown {
+  switch (kindStr) {
+    case 'yarn_lock': return loadYarnLock(absPath);
+    case 'package_lock': return loadPackageLock(absPath);
+    case 'pnpm_lock': return loadPnpmLock(absPath);
+    case 'cargo_lock': return loadCargoLock(absPath);
     default: return null;
   }
 }

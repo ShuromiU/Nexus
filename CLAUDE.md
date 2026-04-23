@@ -74,7 +74,7 @@ TypeScript/JavaScript (.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs), Python, Go, Rust,
 
 **New token-savers:** `nexus_callers`, `nexus_pack`, `nexus_changed`, `nexus_diff_outline`, `nexus_signatures`, `nexus_definition_at`, `nexus_unused_exports`, `nexus_kind_index`, `nexus_doc`, `nexus_batch`
 
-**Structured files (A3):** `nexus_structured_query`, `nexus_structured_outline`
+**Structured files (A3):** `nexus_structured_query`, `nexus_structured_outline`, `nexus_lockfile_deps`
 
 Every tool accepts an optional `compact: true` flag that returns a minimal-key envelope (~50% smaller payload) — drops `query`/`timing_ms`/`index_status` and renames result keys to single letters.
 
@@ -103,5 +103,6 @@ Every tool accepts an optional `compact: true` flag that returns a minimal-key e
 ### Structured File Tools (A3)
 - **`nexus_structured_query(file, path)`** — Extract one value from a structured config file (package.json, tsconfig, Cargo.toml, GHA workflow, generic JSON/YAML/TOML) by dotted path. Numeric segments index arrays: `jobs.test.steps.0.run`. Returns `{ found, value, ... }`. Errors surface with `error`; oversized files return `error: 'file_too_large'` with `limit`/`actual`.
 - **`nexus_structured_outline(file)`** — Shallow top-level view of a structured config file: each entry has `key`, `value_kind`, short `preview` for scalars, `length` for arrays. No line anchors in V3.
+- **`nexus_lockfile_deps(file, name?)`** — List `{name, version}` entries from a lockfile. Supported: `yarn.lock`, `package-lock.json` (v1/v2/v3), `pnpm-lock.yaml` (v6+ and legacy keys, peer-dep suffixes stripped), `Cargo.lock`. Optional `name` filters to all versions of one package. Over-cap → `error: 'file_too_large'` with 20 MB limit.
 
 **Policy transport:** `nexus_policy_check` — evaluate a Claude Code hook event against the Nexus policy layer. Dedicated `nexus-policy-check` bin for the PreToolUse hot path (no CLI spin-up, no reindex). Every response carries `stale_hint`. See `src/policy/` for rules.

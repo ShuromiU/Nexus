@@ -614,6 +614,18 @@ describe('public policy API', () => {
   });
 });
 
+describe('public A3 P2 lockfile API', () => {
+  it('re-exports A3 P2 lockfile helpers from the public API', async () => {
+    const api = await import('../src/index.js');
+    expect(typeof api.parsePackageLock).toBe('function');
+    expect(typeof api.parsePnpmLock).toBe('function');
+    expect(typeof api.parseCargoLock).toBe('function');
+    expect(typeof api.loadPackageLock).toBe('function');
+    expect(typeof api.loadPnpmLock).toBe('function');
+    expect(typeof api.loadCargoLock).toBe('function');
+  });
+});
+
 describe('E2E: Self-index', () => {
   const nexusRoot = path.resolve(__dirname, '..');
   let dbPath: string;

@@ -19,12 +19,21 @@ export { parseGenericToml } from './generic-toml.js';
 export { parseYarnLock } from './yarn-lock.js';
 export type { ParsedYarnLock } from './yarn-lock.js';
 
+export { parsePackageLock } from './package-lock.js';
+export type { ParsedPackageLock } from './package-lock.js';
+
+export { parsePnpmLock } from './pnpm-lock.js';
+export type { ParsedPnpmLock } from './pnpm-lock.js';
+
+export { parseCargoLock } from './cargo-lock.js';
+export type { ParsedCargoLock } from './cargo-lock.js';
+
 // Loaders (A2) — read + size-cap + parse + cache.
 export {
   loadPackageJson, loadTsconfig, loadGenericJson,
   loadGhaWorkflow, loadGenericYaml,
   loadCargoToml, loadGenericToml,
-  loadYarnLock,
+  loadYarnLock, loadPackageLock, loadPnpmLock, loadCargoLock,
   SIZE_CAPS,
 } from './loaders.js';
 export type { LoadError } from './loaders.js';

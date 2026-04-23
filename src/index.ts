@@ -36,10 +36,11 @@ export {
   parsePackageJson, parseTsconfig, parseGenericJson,
   parseGhaWorkflow, parseGenericYaml,
   parseCargoToml, parseGenericToml,
-  parseYarnLock,
+  parseYarnLock, parsePackageLock, parsePnpmLock, parseCargoLock,
 } from './analysis/documents/index.js';
 export type {
-  ParsedPackageJson, ParsedTsconfig, ParsedGhaWorkflow, ParsedCargoToml, ParsedYarnLock,
+  ParsedPackageJson, ParsedTsconfig, ParsedGhaWorkflow, ParsedCargoToml,
+  ParsedYarnLock, ParsedPackageLock, ParsedPnpmLock, ParsedCargoLock,
 } from './analysis/documents/index.js';
 
 // Document loaders + cache (A2) — fs-aware, size-capped, cached.
@@ -47,7 +48,7 @@ export {
   loadPackageJson, loadTsconfig, loadGenericJson,
   loadGhaWorkflow, loadGenericYaml,
   loadCargoToml, loadGenericToml,
-  loadYarnLock,
+  loadYarnLock, loadPackageLock, loadPnpmLock, loadCargoLock,
   SIZE_CAPS,
   getDocumentCache, resetDocumentCache, DocumentCache,
 } from './analysis/documents/index.js';
@@ -72,6 +73,7 @@ export type {
   SignatureResult, UnusedExportResult, DocResult,
   BatchSubResult, BatchResult,
   StructuredQueryResult, StructuredOutlineEntry, StructuredOutlineFileResult, StructuredValueKind,
+  LockfileDepsResult,
 } from './query/engine.js';
 export { compactify, compactifyValue, maybeCompactify, COMPACT_KEY_MAP } from './query/compact.js';
 export { fuzzyScore, rankResults } from './query/ranking.js';

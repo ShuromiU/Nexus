@@ -859,6 +859,23 @@ export function createProgram(): Command {
       }
     });
 
+  // ── lockfile-deps ──────────────────────────────────────────────────
+
+  program
+    .command('lockfile-deps <file> [name]')
+    .description('List {name, version} entries from a lockfile (yarn.lock, package-lock.json, pnpm-lock.yaml, Cargo.lock)')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((file: string, name: string | undefined, opts: { pretty?: boolean }) => {
+      const { db } = openQueryDb(process.cwd());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.lockfileDeps(file, name);
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
   // ── serve ──────────────────────────────────────────────────────────
 
   program

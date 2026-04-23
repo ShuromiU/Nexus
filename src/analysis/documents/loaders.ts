@@ -7,6 +7,9 @@ import { parseGenericYaml } from './generic-yaml.js';
 import { parseCargoToml, type ParsedCargoToml } from './cargo-toml.js';
 import { parseGenericToml } from './generic-toml.js';
 import { parseYarnLock, type ParsedYarnLock } from './yarn-lock.js';
+import { parsePackageLock, type ParsedPackageLock } from './package-lock.js';
+import { parsePnpmLock, type ParsedPnpmLock } from './pnpm-lock.js';
+import { parseCargoLock, type ParsedCargoLock } from './cargo-lock.js';
 import { getDocumentCache } from './cache.js';
 
 export const SIZE_CAPS = {
@@ -18,6 +21,9 @@ export const SIZE_CAPS = {
   yaml_generic: 5 * 1024 * 1024,
   toml_generic: 5 * 1024 * 1024,
   yarn_lock: 20 * 1024 * 1024,
+  package_lock: 20 * 1024 * 1024,
+  pnpm_lock: 20 * 1024 * 1024,
+  cargo_lock: 20 * 1024 * 1024,
 } as const;
 
 export type LoadError = {
@@ -88,4 +94,16 @@ export function loadGenericToml(absPath: string): unknown | LoadError {
 
 export function loadYarnLock(absPath: string): ParsedYarnLock | LoadError {
   return loadCached(absPath, SIZE_CAPS.yarn_lock, parseYarnLock);
+}
+
+export function loadPackageLock(absPath: string): ParsedPackageLock | LoadError {
+  return loadCached(absPath, SIZE_CAPS.package_lock, parsePackageLock);
+}
+
+export function loadPnpmLock(absPath: string): ParsedPnpmLock | LoadError {
+  return loadCached(absPath, SIZE_CAPS.pnpm_lock, parsePnpmLock);
+}
+
+export function loadCargoLock(absPath: string): ParsedCargoLock | LoadError {
+  return loadCached(absPath, SIZE_CAPS.cargo_lock, parseCargoLock);
 }

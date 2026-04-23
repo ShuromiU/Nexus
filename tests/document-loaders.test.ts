@@ -7,6 +7,9 @@ import {
   loadGhaWorkflow, loadGenericYaml, loadCargoToml, loadGenericToml,
   loadYarnLock,
 } from '../src/analysis/documents/loaders.js';
+import {
+  loadPackageLock, loadPnpmLock, loadCargoLock,
+} from '../src/analysis/documents/loaders.js';
 import { resetDocumentCache } from '../src/analysis/documents/cache.js';
 
 let tmpDir: string;
@@ -225,5 +228,52 @@ describe('loadYarnLock', () => {
     if (!('error' in r)) throw new Error('should have errored');
     expect(r.error).toBe('file_too_large');
     if ('limit' in r) expect(r.limit).toBe(20 * 1024 * 1024);
+  });
+});
+
+describe('lockfile loaders', () => {
+  it('reads and parses package-lock.json', () => {
+    const p = write('package-lock.json', JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        '': { name: 'root', version: '1.0.0' },
+        'node_modules/react': { version: '18.2.0' },
+      },
+    }));
+    const r = loadPackageLock(p);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([{ name: 'react', version: '18.2.0' }]);
+  });
+
+  it('reads and parses pnpm-lock.yaml', () => {
+    const p = write('pnpm-lock.yaml', `lockfileVersion: '9.0'
+packages:
+  /react@18.2.0:
+    resolution: { integrity: sha512-foo }
+`);
+    const r = loadPnpmLock(p);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([{ name: 'react', version: '18.2.0' }]);
+  });
+
+  it('reads and parses Cargo.lock', () => {
+    const p = write('Cargo.lock', `[[package]]
+name = "serde"
+version = "1.0.195"
+`);
+    const r = loadCargoLock(p);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([{ name: 'serde', version: '1.0.195' }]);
+  });
+
+  it('returns file_too_large over 20 MB cap for package-lock.json', () => {
+    const padding = 'x'.repeat(21 * 1024 * 1024);
+    const p = write('package-lock.json', padding);
+    const r = loadPackageLock(p);
+    expect('error' in r).toBe(true);
+    if ('error' in r) {
+      expect(r.error).toBe('file_too_large');
+      expect(r.limit).toBe(20 * 1024 * 1024);
+    }
   });
 });
