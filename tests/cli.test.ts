@@ -409,3 +409,15 @@ describe('formatSlice', () => {
     expect(output).toContain('Output truncated.');
   });
 });
+
+describe('package.json bins', () => {
+  it('registers nexus-policy-check alongside nexus', () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { bin: Record<string, string> };
+    expect(pkg.bin).toEqual({
+      nexus: 'dist/transports/cli.js',
+      'nexus-policy-check': 'dist/transports/policy-entry.js',
+    });
+  });
+});
