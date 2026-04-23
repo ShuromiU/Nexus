@@ -65,4 +65,16 @@ describe('computeStaleHint', () => {
     });
     expect(hint).toBe(false);
   });
+
+  it('returns true when DB exists but meta table is missing (fix for handle leak)', () => {
+    const dbPath = path.join(tmpDir, '.nexus', 'index.db');
+    // Create a WAL-mode DB file with no schema applied — no meta table exists.
+    // Using openDatabase (not bare Database) so WAL infrastructure is already
+    // in place when computeStaleHint opens it readonly, avoiding Windows
+    // file-locking issues from readonly WAL promotion.
+    const db = openDatabase(dbPath);
+    db.close();
+    const hint = computeStaleHint({ rootDir: tmpDir });
+    expect(hint).toBe(true);
+  });
 });

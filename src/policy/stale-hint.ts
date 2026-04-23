@@ -23,14 +23,17 @@ export function computeStaleHint(input: StaleHintInput): boolean {
   let lastIndexedAtMs = 0;
   try {
     const db = openDatabase(dbPath, { readonly: true });
-    const row = db
-      .prepare('SELECT value FROM meta WHERE key = ?')
-      .get('last_indexed_at') as { value: string } | undefined;
-    db.close();
-    if (!row) return true;
-    const t = Date.parse(row.value);
-    if (Number.isNaN(t)) return true;
-    lastIndexedAtMs = t;
+    try {
+      const row = db
+        .prepare('SELECT value FROM meta WHERE key = ?')
+        .get('last_indexed_at') as { value: string } | undefined;
+      if (!row) return true;
+      const t = Date.parse(row.value);
+      if (Number.isNaN(t)) return true;
+      lastIndexedAtMs = t;
+    } finally {
+      db.close();
+    }
   } catch {
     return true;
   }
