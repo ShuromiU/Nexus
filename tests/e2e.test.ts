@@ -606,6 +606,14 @@ export class DeepModule {
 
 // ── E2E: Self-index (Nexus indexes its own source) ────────────────────
 
+describe('public policy API', () => {
+  it('re-exports policy primitives', async () => {
+    const mod = await import('../src/index.js');
+    expect(typeof mod.dispatchPolicy).toBe('function');
+    expect(Array.isArray(mod.DEFAULT_RULES)).toBe(true);
+  });
+});
+
 describe('E2E: Self-index', () => {
   const nexusRoot = path.resolve(__dirname, '..');
   let dbPath: string;

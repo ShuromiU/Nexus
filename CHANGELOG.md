@@ -5,6 +5,12 @@
 - `nexus_structured_outline(file)` — list top-level keys with value kinds (string / number / boolean / null / array / object), short previews for scalars, array lengths for arrays. Same supported kinds as `structured_query`.
 - CLI: `nexus structured-query <file> <path>` and `nexus structured-outline <file>`.
 - Public re-exports: `StructuredQueryResult`, `StructuredOutlineEntry`, `StructuredOutlineFileResult`, `StructuredValueKind`.
+- **Policy transport** — new `nexus-policy-check` bin and `src/policy/` layer. PreToolUse hooks can consult Nexus policy without spawning the full CLI. Every response carries `stale_hint: boolean`; the entry does not reindex.
+- **`nexus_policy_check` MCP tool** — hook-less fallback that evaluates policy against a Claude Code hook event. Does not trigger `ensureFresh()`.
+- **First reference rule** — `grep-on-code`: ports the Grep allow-list from `hooks/nexus-first.sh` to TypeScript.
+
+### Changed
+- `hooks/nexus-first.sh` Grep branch now delegates to `nexus-policy-check`; Agent and Glob branches unchanged.
 
 ### Notes
 - No line anchors — V3 defers anchor support until a location-preserving parser set is chosen.

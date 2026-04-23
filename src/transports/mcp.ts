@@ -15,6 +15,9 @@ import { compactify } from '../query/compact.js';
 import { runIndex } from '../index/orchestrator.js';
 import { detectRoot } from '../workspace/detector.js';
 import type Database from 'better-sqlite3';
+import { dispatchPolicy } from '../policy/dispatcher.js';
+import { DEFAULT_RULES } from '../policy/index.js';
+import type { PolicyEvent } from '../policy/types.js';
 
 // Side-effect: register all language adapters
 import '../analysis/languages/typescript.js';
@@ -514,11 +517,56 @@ export function createMcpServer(): Server {
             required: ['file'],
           },
         },
+        {
+          name: 'nexus_policy_check',
+          description:
+            'Evaluate the Nexus policy layer against a hook event. Fallback for platforms without PreToolUse hook support; otherwise hook dispatchers should call the nexus-policy-check bin directly. Does NOT trigger a reindex — responses carry stale_hint.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              event: {
+                type: 'object',
+                description: 'Claude Code hook event payload',
+                properties: {
+                  hook_event_name: { type: 'string' },
+                  tool_name: { type: 'string' },
+                  tool_input: { type: 'object' },
+                  session_id: { type: 'string' },
+                  cwd: { type: 'string' },
+                },
+                required: ['tool_name', 'tool_input'],
+              },
+              ...COMPACT_PROP,
+            },
+            required: ['event'],
+          },
+        },
       ],
     };
   });
 
   // ── Call Tool ───────────────────────────────────────────────────────
+
+  function executePolicyCheck(args: Record<string, unknown>): NexusResult<unknown> {
+    const event = args.event;
+    if (!event || typeof event !== 'object') {
+      throw new Error('nexus_policy_check: event argument is required and must be an object');
+    }
+    const typedEvent = event as PolicyEvent;
+    const rootDir = indexRootDir ?? process.cwd();
+    const t0 = Date.now();
+    const response = dispatchPolicy(typedEvent, { rootDir, rules: DEFAULT_RULES });
+    const timing_ms = Date.now() - t0;
+    return {
+      type: 'policy_check',
+      query: `policy_check ${typedEvent.tool_name ?? 'unknown'}`,
+      results: [response],
+      count: 1,
+      index_status: response.stale_hint ? 'stale' : 'current',
+      index_health: 'ok',
+      timing_ms,
+    };
+  }
 
   /**
    * Dispatch a single tool call to its engine method. Returns the verbose
@@ -526,6 +574,7 @@ export function createMcpServer(): Server {
    * top-level CallToolRequest handler and the nexus_batch sub-dispatcher.
    */
   function dispatch(toolName: string, args: Record<string, unknown>): NexusResult<unknown> {
+    if (toolName === 'nexus_policy_check') return executePolicyCheck(args);
     const qe = getEngine();
     switch (toolName) {
       case 'nexus_find':
@@ -621,6 +670,11 @@ export function createMcpServer(): Server {
         const result = runIndex(indexRootDir);
         lastFreshnessCheck = Date.now();
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+
+      if (name === 'nexus_policy_check') {
+        const result = executePolicyCheck(args);
+        return respond(result, compact);
       }
 
       // Auto-refresh if stale (>30s since last check)

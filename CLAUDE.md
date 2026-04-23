@@ -103,3 +103,5 @@ Every tool accepts an optional `compact: true` flag that returns a minimal-key e
 ### Structured File Tools (A3)
 - **`nexus_structured_query(file, path)`** — Extract one value from a structured config file (package.json, tsconfig, Cargo.toml, GHA workflow, generic JSON/YAML/TOML) by dotted path. Numeric segments index arrays: `jobs.test.steps.0.run`. Returns `{ found, value, ... }`. Errors surface with `error`; oversized files return `error: 'file_too_large'` with `limit`/`actual`.
 - **`nexus_structured_outline(file)`** — Shallow top-level view of a structured config file: each entry has `key`, `value_kind`, short `preview` for scalars, `length` for arrays. No line anchors in V3.
+
+**Policy transport:** `nexus_policy_check` — evaluate a Claude Code hook event against the Nexus policy layer. Dedicated `nexus-policy-check` bin for the PreToolUse hot path (no CLI spin-up, no reindex). Every response carries `stale_hint`. See `src/policy/` for rules.
