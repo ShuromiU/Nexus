@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parsePackageLock } from '../src/analysis/documents/package-lock.js';
+import { parsePnpmLock } from '../src/analysis/documents/pnpm-lock.js';
 
 describe('parsePackageLock', () => {
   it('parses lockfileVersion 3 (packages map)', () => {
@@ -62,6 +63,65 @@ describe('parsePackageLock', () => {
 
   it('returns empty entries when neither packages nor dependencies exist', () => {
     const r = parsePackageLock('{}');
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([]);
+  });
+});
+
+describe('parsePnpmLock', () => {
+  it('parses pnpm v6/v9 packages keys (/name@version)', () => {
+    const src = `lockfileVersion: '9.0'
+packages:
+  /react@18.2.0:
+    resolution: { integrity: sha512-foo }
+  /@scope/pkg@0.3.1:
+    resolution: { integrity: sha512-bar }
+  /lodash@4.17.21:
+    resolution: { integrity: sha512-baz }
+`;
+    const r = parsePnpmLock(src);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual(expect.arrayContaining([
+      { name: 'react', version: '18.2.0' },
+      { name: '@scope/pkg', version: '0.3.1' },
+      { name: 'lodash', version: '4.17.21' },
+    ]));
+  });
+
+  it('parses legacy pnpm keys (/name/version)', () => {
+    const src = `lockfileVersion: '5.4'
+packages:
+  /react/18.2.0:
+    resolution: { integrity: sha512-foo }
+  /@scope/pkg/0.3.1:
+    resolution: { integrity: sha512-bar }
+`;
+    const r = parsePnpmLock(src);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual(expect.arrayContaining([
+      { name: 'react', version: '18.2.0' },
+      { name: '@scope/pkg', version: '0.3.1' },
+    ]));
+  });
+
+  it('strips peer-dependency suffixes from keys', () => {
+    const src = `lockfileVersion: '9.0'
+packages:
+  /react-dom@18.2.0(react@18.2.0):
+    resolution: { integrity: sha512-foo }
+`;
+    const r = parsePnpmLock(src);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([{ name: 'react-dom', version: '18.2.0' }]);
+  });
+
+  it('returns { error } on invalid YAML', () => {
+    const r = parsePnpmLock(':::not: valid: yaml: :');
+    expect('error' in r).toBe(true);
+  });
+
+  it('returns empty entries when packages is absent', () => {
+    const r = parsePnpmLock("lockfileVersion: '9.0'\n");
     if ('error' in r) throw new Error('unreachable');
     expect(r.entries).toEqual([]);
   });
