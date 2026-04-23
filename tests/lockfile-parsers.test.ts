@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parsePackageLock } from '../src/analysis/documents/package-lock.js';
 import { parsePnpmLock } from '../src/analysis/documents/pnpm-lock.js';
+import { parseCargoLock } from '../src/analysis/documents/cargo-lock.js';
 
 describe('parsePackageLock', () => {
   it('parses lockfileVersion 3 (packages map)', () => {
@@ -145,5 +146,51 @@ packages:
   it('returns { error } when YAML root is not an object', () => {
     const r = parsePnpmLock('just-a-string\n');
     expect('error' in r).toBe(true);
+  });
+});
+
+describe('parseCargoLock', () => {
+  it('parses [[package]] array', () => {
+    const src = `version = 3
+
+[[package]]
+name = "serde"
+version = "1.0.195"
+
+[[package]]
+name = "tokio"
+version = "1.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`;
+    const r = parseCargoLock(src);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([
+      { name: 'serde', version: '1.0.195' },
+      { name: 'tokio', version: '1.35.0' },
+    ]);
+  });
+
+  it('skips entries missing name or version', () => {
+    const src = `[[package]]
+name = "ok"
+version = "0.1.0"
+
+[[package]]
+name = "no-version"
+`;
+    const r = parseCargoLock(src);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([{ name: 'ok', version: '0.1.0' }]);
+  });
+
+  it('returns { error } on invalid TOML', () => {
+    const r = parseCargoLock('not = [valid] = toml');
+    expect('error' in r).toBe(true);
+  });
+
+  it('returns empty entries when no packages', () => {
+    const r = parseCargoLock('version = 3\n');
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([]);
   });
 });
