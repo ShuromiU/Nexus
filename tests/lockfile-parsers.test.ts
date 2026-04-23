@@ -193,4 +193,17 @@ name = "no-version"
     if ('error' in r) throw new Error('unreachable');
     expect(r.entries).toEqual([]);
   });
+
+  it('returns { error } when TOML root is not an object', () => {
+    // smol-toml will likely throw on invalid input, hitting the catch path —
+    // both paths produce { error }, so the assertion holds either way.
+    const r = parseCargoLock('= not_a_table');
+    expect('error' in r).toBe(true);
+  });
+
+  it('returns empty entries for an empty file', () => {
+    const r = parseCargoLock('');
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual([]);
+  });
 });

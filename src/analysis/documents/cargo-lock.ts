@@ -19,7 +19,7 @@ export function parseCargoLock(content: string): ParsedCargoLock | ParseError {
     return { error: e instanceof Error ? e.message : 'invalid TOML' };
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return { entries: [] };
+    return { error: 'Cargo.lock root must be a table' };
   }
   const pkgs = (raw as Record<string, unknown>).package;
   if (!Array.isArray(pkgs)) return { entries: [] };
