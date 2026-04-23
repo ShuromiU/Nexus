@@ -1,3 +1,22 @@
+## [Unreleased] — A3 P2 lockfile_deps
+
+### Added
+- `nexus_lockfile_deps(file, name?)` — list `{name, version}` entries from a lockfile. Supported: `yarn.lock`, `package-lock.json` (lockfileVersion 1/2/3), `pnpm-lock.yaml` (v6+ and legacy v5 keys, peer-dep suffixes stripped), `Cargo.lock`. Optional `name` filters to matching entries (multiple versions preserved).
+- CLI: `nexus lockfile-deps <file> [name]`.
+- Parsers: `parsePackageLock`, `parsePnpmLock`, `parseCargoLock` (plus existing `parseYarnLock`).
+- Loaders: `loadPackageLock`, `loadPnpmLock`, `loadCargoLock` — each enforces a 20 MB size cap per the V3 spec. Reuse the A2 LRU cache.
+- Public re-exports: `LockfileDepsResult`, `Parsed{PackageLock,PnpmLock,CargoLock}`.
+- Compact-mode key: `version → ve`.
+
+### Notes
+- Query-time only. Lockfile data is not indexed.
+- No transitive graph or dedupe — entries are the raw `{name, version}` pairs from the lockfile.
+- Parse errors surface as `{ error, ... }` on the single result; `file_too_large` includes `limit` and `actual` bytes.
+- Supported lockfile kinds derived from `classifyPath()` exact-basename rules; other lockfiles (Gemfile.lock, go.sum, poetry.lock, …) deferred.
+- `pnpm-lock.yaml` key parser handles git-URL versions correctly (first `@` wins, not last) — real pnpm output for git deps works without corruption.
+
+---
+
 ## [Unreleased] — structured document MCP tools (A3 P0+P1)
 
 ### Added
