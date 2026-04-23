@@ -547,12 +547,34 @@ export function createMcpServer(): Server {
 
   // ── Call Tool ───────────────────────────────────────────────────────
 
+  function executePolicyCheck(args: Record<string, unknown>): NexusResult<unknown> {
+    const event = args.event;
+    if (!event || typeof event !== 'object') {
+      throw new Error('nexus_policy_check: event argument is required and must be an object');
+    }
+    const typedEvent = event as PolicyEvent;
+    const rootDir = indexRootDir ?? process.cwd();
+    const t0 = Date.now();
+    const response = dispatchPolicy(typedEvent, { rootDir, rules: DEFAULT_RULES });
+    const timing_ms = Date.now() - t0;
+    return {
+      type: 'policy_check',
+      query: `policy_check ${typedEvent.tool_name ?? 'unknown'}`,
+      results: [response],
+      count: 1,
+      index_status: response.stale_hint ? 'stale' : 'current',
+      index_health: 'ok',
+      timing_ms,
+    };
+  }
+
   /**
    * Dispatch a single tool call to its engine method. Returns the verbose
    * NexusResult — the caller decides whether to compactify. Used by both the
    * top-level CallToolRequest handler and the nexus_batch sub-dispatcher.
    */
   function dispatch(toolName: string, args: Record<string, unknown>): NexusResult<unknown> {
+    if (toolName === 'nexus_policy_check') return executePolicyCheck(args);
     const qe = getEngine();
     switch (toolName) {
       case 'nexus_find':
@@ -631,20 +653,6 @@ export function createMcpServer(): Server {
         return qe.structuredQuery(args.file as string, args.path as string);
       case 'nexus_structured_outline':
         return qe.structuredOutline(args.file as string);
-      case 'nexus_policy_check': {
-        const event = args.event as PolicyEvent;
-        const rootDir = indexRootDir ?? process.cwd();
-        const response = dispatchPolicy(event, { rootDir, rules: DEFAULT_RULES });
-        return {
-          type: 'policy_check',
-          query: `policy_check ${event.tool_name}`,
-          results: [response],
-          count: 1,
-          index_status: 'current',
-          index_health: 'ok',
-          timing_ms: 0,
-        };
-      }
       default:
         throw new Error(`Unknown tool: ${toolName}`);
     }
@@ -665,18 +673,7 @@ export function createMcpServer(): Server {
       }
 
       if (name === 'nexus_policy_check') {
-        const event = args.event as PolicyEvent;
-        const rootDir = indexRootDir ?? process.cwd();
-        const response = dispatchPolicy(event, { rootDir, rules: DEFAULT_RULES });
-        const result: NexusResult<unknown> = {
-          type: 'policy_check',
-          query: `policy_check ${event.tool_name}`,
-          results: [response],
-          count: 1,
-          index_status: 'current',
-          index_health: 'ok',
-          timing_ms: 0,
-        };
+        const result = executePolicyCheck(args);
         return respond(result, compact);
       }
 

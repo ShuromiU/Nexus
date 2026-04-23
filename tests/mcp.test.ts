@@ -387,6 +387,7 @@ describe('nexus_policy_check tool', () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.results[0].decision).toBe('deny');
     expect(typeof payload.results[0].stale_hint).toBe('boolean');
+    expect(['current', 'stale']).toContain(payload.index_status);
   });
 
   it('returns allow for a non-Grep event', async () => {
@@ -399,5 +400,21 @@ describe('nexus_policy_check tool', () => {
     });
     const payload = JSON.parse(result.content[0].text);
     expect(payload.results[0].decision).toBe('allow');
+  });
+
+  it('returns error for missing event arg', async () => {
+    const result = await callTool('nexus_policy_check', {});
+    expect(result.isError).toBe(true);
+  });
+
+  it('works as a nexus_batch sub-call', async () => {
+    const result = await callTool('nexus_batch', {
+      calls: [
+        { tool: 'nexus_policy_check', args: { event: { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'README.md' } } } },
+      ],
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.results[0].ok).toBe(true);
+    expect(payload.results[0].result.results[0].decision).toBe('allow');
   });
 });
