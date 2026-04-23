@@ -110,8 +110,13 @@ CREATE INDEX IF NOT EXISTS idx_files_status      ON files(status);
  * Open (or create) the SQLite database with WAL mode and foreign keys.
  * Runs quick_check and applies schema if needed.
  */
-export function openDatabase(dbPath: string): Database.Database {
-  const db = new Database(dbPath);
+export function openDatabase(
+  dbPath: string,
+  opts?: { readonly?: boolean },
+): Database.Database {
+  const db = opts?.readonly
+    ? new Database(dbPath, { readonly: true, fileMustExist: true })
+    : new Database(dbPath);
 
   // WAL mode for concurrent reads
   db.pragma('journal_mode = WAL');
