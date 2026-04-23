@@ -125,4 +125,25 @@ packages:
     if ('error' in r) throw new Error('unreachable');
     expect(r.entries).toEqual([]);
   });
+
+  it('handles git-URL versions (first @ wins)', () => {
+    const src = `lockfileVersion: '9.0'
+packages:
+  /foo@git+ssh://git@github.com/x/y.git:
+    resolution: { integrity: sha512-foo }
+  /@scope/bar@git+ssh://git@host/y.git:
+    resolution: { integrity: sha512-bar }
+`;
+    const r = parsePnpmLock(src);
+    if ('error' in r) throw new Error('unreachable');
+    expect(r.entries).toEqual(expect.arrayContaining([
+      { name: 'foo', version: 'git+ssh://git@github.com/x/y.git' },
+      { name: '@scope/bar', version: 'git+ssh://git@host/y.git' },
+    ]));
+  });
+
+  it('returns { error } when YAML root is not an object', () => {
+    const r = parsePnpmLock('just-a-string\n');
+    expect('error' in r).toBe(true);
+  });
 });

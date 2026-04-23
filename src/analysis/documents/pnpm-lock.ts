@@ -22,7 +22,7 @@ export function parsePnpmLock(content: string): ParsedPnpmLock | ParseError {
     return { error: e instanceof Error ? e.message : 'invalid YAML' };
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return { entries: [] };
+    return { error: 'pnpm-lock.yaml root must be an object' };
   }
   const obj = raw as Record<string, unknown>;
   const pkgs = obj.packages;
@@ -54,7 +54,7 @@ function parsePnpmKey(raw: string): { name: string; version: string } | null {
     const slash = key.indexOf('/');
     if (slash === -1) return null;
     const rest = key.slice(slash + 1); // `name@version` or `name/version`
-    const at = rest.lastIndexOf('@');
+    const at = rest.indexOf('@');
     if (at > 0) {
       return { name: key.slice(0, slash + 1 + at), version: rest.slice(at + 1) };
     }
@@ -65,7 +65,7 @@ function parsePnpmKey(raw: string): { name: string; version: string } | null {
     return null;
   }
 
-  const at = key.lastIndexOf('@');
+  const at = key.indexOf('@');
   if (at > 0) {
     return { name: key.slice(0, at), version: key.slice(at + 1) };
   }
