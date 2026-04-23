@@ -39,36 +39,40 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 # Canonical list of every Nexus MCP tool. Update when adding new tools.
 NEXUS_TOOLS_REGEX='(nexus_find|nexus_refs|nexus_search|nexus_symbols|nexus_exports|nexus_imports|nexus_importers|nexus_grep|nexus_outline|nexus_source|nexus_slice|nexus_deps|nexus_tree|nexus_stats|nexus_callers|nexus_pack|nexus_changed|nexus_diff_outline|nexus_signatures|nexus_definition_at|nexus_unused_exports|nexus_kind_index|nexus_doc|nexus_batch)'
 
-# ── Grep / Glob ──────────────────────────────────────────────────────
-if [ "$TOOL_NAME" = "Grep" ] || [ "$TOOL_NAME" = "Glob" ]; then
-  SEARCH_PATH=$(echo "$INPUT" | jq -r '.tool_input.path // empty')
-  GLOB_TYPE=$(echo "$INPUT" | jq -r '.tool_input.type // empty')
-  GLOB_FILTER=$(echo "$INPUT" | jq -r '.tool_input.glob // empty')
+# ── Grep: delegate to nexus-policy-check ─────────────────────────────
+if [ "$TOOL_NAME" = "Grep" ]; then
+  # Find the policy binary. Prefer a binary on PATH (global install or npx cache),
+  # fall back to npx (local node_modules/.bin when run inside the Nexus repo).
+  if command -v nexus-policy-check >/dev/null 2>&1; then
+    DECISION=$(echo "$INPUT" | nexus-policy-check)
+  else
+    DECISION=$(echo "$INPUT" | npx --no-install nexus-policy-check 2>/dev/null)
+  fi
 
-  # Allow non-code file types
-  if echo "$GLOB_FILTER" | grep -qiE '\.(md|json|yaml|yml|toml|env|lock|txt|csv|html|xml|sql|sh|bat|cmd|log)'; then
-    exit 0
-  fi
-  if echo "$GLOB_TYPE" | grep -qiE '^(md|json|yaml|yml|toml)$'; then
-    exit 0
-  fi
-  # Allow non-code directories
-  if echo "$SEARCH_PATH" | grep -qiE '(node_modules|\.git|\.nexus|docs/|\.env|\.claude/)'; then
-    exit 0
-  fi
-  # Glob is for file discovery — always allow
-  if [ "$TOOL_NAME" = "Glob" ]; then
+  # Fail open if the bin was not available or did not produce output — never
+  # block on infra failures.
+  if [ -z "$DECISION" ]; then
     exit 0
   fi
 
-  # Deny Grep on code files
-  echo '{
-    "hookSpecificOutput": {
-      "hookEventName": "PreToolUse",
-      "permissionDecision": "deny",
-      "permissionDecisionReason": "NEXUS ONLY: Use nexus_find, nexus_refs, nexus_search, or nexus_grep instead of Grep for code files. Grep is NOT allowed for code — use Nexus."
-    }
-  }'
+  PERMISSION=$(echo "$DECISION" | jq -r '.decision // "allow"')
+  REASON=$(echo "$DECISION" | jq -r '.reason // ""')
+
+  if [ "$PERMISSION" = "deny" ]; then
+    jq -n --arg reason "$REASON" '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: $reason
+      }
+    }'
+    exit 0
+  fi
+  exit 0
+fi
+
+# ── Glob: always allow (file discovery) ──────────────────────────────
+if [ "$TOOL_NAME" = "Glob" ]; then
   exit 0
 fi
 
