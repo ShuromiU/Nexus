@@ -37,7 +37,7 @@ INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 
 # Canonical list of every Nexus MCP tool. Update when adding new tools.
-NEXUS_TOOLS_REGEX='(nexus_find|nexus_refs|nexus_search|nexus_symbols|nexus_exports|nexus_imports|nexus_importers|nexus_grep|nexus_outline|nexus_source|nexus_slice|nexus_deps|nexus_tree|nexus_stats|nexus_callers|nexus_pack|nexus_changed|nexus_diff_outline|nexus_signatures|nexus_definition_at|nexus_unused_exports|nexus_kind_index|nexus_doc|nexus_batch)'
+NEXUS_TOOLS_REGEX='(nexus_find|nexus_refs|nexus_search|nexus_symbols|nexus_exports|nexus_imports|nexus_importers|nexus_grep|nexus_outline|nexus_source|nexus_slice|nexus_deps|nexus_tree|nexus_stats|nexus_callers|nexus_pack|nexus_changed|nexus_diff_outline|nexus_signatures|nexus_definition_at|nexus_unused_exports|nexus_kind_index|nexus_doc|nexus_batch|nexus_policy_check)'
 
 # ── Grep: delegate to nexus-policy-check ─────────────────────────────
 if [ "$TOOL_NAME" = "Grep" ]; then

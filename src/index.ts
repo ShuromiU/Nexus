@@ -94,4 +94,5 @@ export type {
   PolicyContext,
   PolicyRule,
 } from './policy/types.js';
+export type { StaleHintInput } from './policy/stale-hint.js';
 export { dispatchPolicy, DEFAULT_RULES, computeStaleHint } from './policy/index.js';
