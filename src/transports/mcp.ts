@@ -518,6 +518,19 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_lockfile_deps',
+          description: 'List {name, version} entries from a lockfile. Supported: yarn.lock, package-lock.json (v1/v2/v3), pnpm-lock.yaml, Cargo.lock. Optional name filter returns all versions of that package.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              file: { type: 'string', description: 'Path to the lockfile (relative to repo root or absolute).' },
+              name: { type: 'string', description: 'Optional: filter to entries with this exact package name.' },
+              ...COMPACT_PROP,
+            },
+            required: ['file'],
+          },
+        },
+        {
           name: 'nexus_policy_check',
           description:
             'Evaluate the Nexus policy layer against a hook event. Fallback for platforms without PreToolUse hook support; otherwise hook dispatchers should call the nexus-policy-check bin directly. Does NOT trigger a reindex — responses carry stale_hint.',
@@ -653,6 +666,8 @@ export function createMcpServer(): Server {
         return qe.structuredQuery(args.file as string, args.path as string);
       case 'nexus_structured_outline':
         return qe.structuredOutline(args.file as string);
+      case 'nexus_lockfile_deps':
+        return qe.lockfileDeps(args.file as string, args.name as string | undefined);
       default:
         throw new Error(`Unknown tool: ${toolName}`);
     }

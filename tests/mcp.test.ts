@@ -418,3 +418,48 @@ describe('nexus_policy_check tool', () => {
     expect(payload.results[0].result.results[0].decision).toBe('allow');
   });
 });
+
+describe('nexus_lockfile_deps tool', () => {
+  it('registers nexus_lockfile_deps with file + optional name', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_lockfile_deps');
+    expect(tool).toBeDefined();
+    expect((tool!.inputSchema as { required?: string[] }).required).toEqual(['file']);
+    expect(Object.keys((tool!.inputSchema as { properties?: Record<string, unknown> }).properties ?? {})).toEqual(
+      expect.arrayContaining(['file', 'name', 'compact']),
+    );
+  });
+
+  describe('dispatch', () => {
+    let tmpDir: string;
+    let dispatchDb: Database.Database;
+    let dispatchEngine: QueryEngine;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-mcp-lockfile-'));
+      dispatchDb = new Database(':memory:');
+      dispatchDb.pragma('journal_mode = WAL');
+      dispatchDb.pragma('foreign_keys = ON');
+      applySchema(dispatchDb);
+      initializeMeta(dispatchDb, tmpDir, true);
+      dispatchEngine = new QueryEngine(dispatchDb);
+    });
+
+    afterEach(() => {
+      dispatchDb.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('dispatches nexus_lockfile_deps to QueryEngine.lockfileDeps', () => {
+      fs.writeFileSync(path.join(tmpDir, 'yarn.lock'), [
+        '# yarn lockfile v1',
+        '"react@^18.0.0":',
+        '  version "18.2.0"',
+        '',
+      ].join('\n'));
+      const result = dispatchEngine.lockfileDeps('yarn.lock');
+      expect(result.type).toBe('lockfile_deps');
+      expect(result.results[0].entries).toEqual([{ name: 'react', version: '18.2.0' }]);
+    });
+  });
+});

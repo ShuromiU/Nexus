@@ -63,6 +63,7 @@ const KEY_MAP: Record<string, string> = {
   type: 'ty',
   value: 'v',
   value_kind: 'vk',
+  version: 've',
 };
 
 /** Reverse-map exported for tests/debug. */
