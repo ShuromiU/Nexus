@@ -75,4 +75,22 @@ describe('readOnStructuredRule', () => {
     // extraction should still find `package.json` as the final segment.
     expect(d?.decision).toBe('ask');
   });
+
+  it('still asks for paged Read on package.json (structured rule has no paging guard)', () => {
+    const d = readOnStructuredRule.evaluate(
+      ev('Read', { file_path: 'package.json', offset: 0, limit: 100 }),
+      ctx,
+    );
+    expect(d?.decision).toBe('ask');
+  });
+
+  it('classifies GHA workflow correctly under an absolute path', () => {
+    const absCtx: PolicyContext = { rootDir: '/repo', dbPath: '/repo/.nexus/index.db' };
+    const d = readOnStructuredRule.evaluate(
+      ev('Read', { file_path: '/repo/.github/workflows/ci.yml' }),
+      absCtx,
+    );
+    expect(d?.decision).toBe('ask');
+    expect(d?.reason).toMatch(/gha_workflow/);
+  });
 });

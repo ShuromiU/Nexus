@@ -8,9 +8,7 @@ const EMPTY_CONFIG = { languages: {} };
 const CONTEXT =
   'This file is indexed by Nexus. Prefer nexus_outline(file) to see ' +
   'structure + signatures, or nexus_source(symbol, file) for a specific ' +
-  "symbol. Fall back to Read if those don't answer the question. " +
-  'The policy response includes stale_hint — if true, the index may lag ' +
-  'recent edits to this file.';
+  "symbol. Fall back to Read if those don't answer the question.";
 
 /**
  * Bare Read on an indexed source file → allow, but inject a nudge via
@@ -28,7 +26,7 @@ const CONTEXT =
  */
 export const readOnSourceRule: PolicyRule = {
   name: 'read-on-source',
-  evaluate(event) {
+  evaluate(event, ctx) {
     if (event.tool_name !== 'Read') return null;
 
     const input = event.tool_input;
@@ -41,12 +39,22 @@ export const readOnSourceRule: PolicyRule = {
     const normalized = raw.replace(/\\/g, '/');
     if (NON_CODE_PATH.test(normalized)) return null;
 
-    const basename = path.posix.basename(normalized);
+    const rootDirPosix = ctx.rootDir.replace(/\\/g, '/');
+    const absPath = path.posix.isAbsolute(normalized)
+      ? normalized
+      : path.posix.resolve(rootDirPosix || '/', normalized);
+    const candidateRel = rootDirPosix
+      ? path.posix.relative(rootDirPosix, absPath)
+      : normalized;
+    // If the path is outside rootDir (starts with '..'), fall back to the normalized
+    // path — classifyPath will still make a best-effort decision based on basename.
+    const relPath = candidateRel.startsWith('..') ? normalized : candidateRel;
+    const basename = path.posix.basename(relPath);
     if (basename.length === 0) return null;
 
     let kind;
     try {
-      kind = classifyPath(normalized, basename, EMPTY_CONFIG);
+      kind = classifyPath(relPath, basename, EMPTY_CONFIG);
     } catch {
       return null;
     }

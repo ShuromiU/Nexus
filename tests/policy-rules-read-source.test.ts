@@ -15,7 +15,6 @@ describe('readOnSourceRule', () => {
     expect(d?.rule).toBe('read-on-source');
     expect(d?.additional_context).toMatch(/nexus_outline/);
     expect(d?.additional_context).toMatch(/nexus_source/);
-    expect(d?.additional_context).toMatch(/stale_hint/);
   });
 
   it('returns null when offset is present', () => {
