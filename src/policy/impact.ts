@@ -1,4 +1,4 @@
-import type { OutlineForImpact, OutlineEntryForImpact } from './types.js';
+import type { OutlineForImpact } from './types.js';
 
 export interface SymbolMatch {
   name: string;
@@ -45,12 +45,4 @@ export function bucketRisk(callerCount: number): RiskBucket {
   if (callerCount <= 2) return 'low';
   if (callerCount <= 10) return 'medium';
   return 'high';
-}
-
-/** Exported for use by tests and by the adjacent summary helpers below. */
-export function _entryAt(
-  outline: OutlineForImpact,
-  name: string,
-): OutlineEntryForImpact | undefined {
-  return outline.outline.find((e) => e.name === name);
 }

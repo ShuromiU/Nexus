@@ -435,11 +435,6 @@ export function bucketRisk(callerCount: number): RiskBucket {
   if (callerCount <= 10) return 'medium';
   return 'high';
 }
-
-/** Exported for use by tests and by the adjacent summary helpers below. */
-export function _entryAt(outline: OutlineForImpact, name: string): OutlineEntryForImpact | undefined {
-  return outline.outline.find(e => e.name === name);
-}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
