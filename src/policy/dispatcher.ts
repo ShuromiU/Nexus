@@ -1,10 +1,12 @@
 import * as path from 'node:path';
 import { computeStaleHint } from './stale-hint.js';
-import type { PolicyEvent, PolicyResponse, PolicyRule } from './types.js';
+import type { PolicyEvent, PolicyResponse, PolicyRule, PolicyContext, QueryEngineLike } from './types.js';
 
 export interface DispatchOptions {
   rootDir: string;
   rules: readonly PolicyRule[];
+  /** Optional DB-backed engine forwarded into ctx for DB-aware rules. */
+  queryEngine?: QueryEngineLike;
 }
 
 /**
@@ -16,9 +18,10 @@ export interface DispatchOptions {
  * a deny to a warning on stale data if it wishes.
  */
 export function dispatchPolicy(event: PolicyEvent, opts: DispatchOptions): PolicyResponse {
-  const ctx = {
+  const ctx: PolicyContext = {
     rootDir: opts.rootDir,
     dbPath: path.join(opts.rootDir, '.nexus', 'index.db'),
+    ...(opts.queryEngine ? { queryEngine: opts.queryEngine } : {}),
   };
 
   for (const rule of opts.rules) {

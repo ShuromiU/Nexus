@@ -169,4 +169,40 @@ describe('dispatchPolicy with DEFAULT_RULES', () => {
     expect(resp.rule).toBeUndefined();
     expect(resp.additional_context).toBeUndefined();
   });
+
+  it('forwards queryEngine into ctx when provided in options', () => {
+    const captured: { hasEngine: boolean } = { hasEngine: false };
+    const rule: PolicyRule = {
+      name: 'capture',
+      evaluate: (_event, ctx) => {
+        captured.hasEngine = ctx.queryEngine !== undefined;
+        return { decision: 'allow', rule: 'capture' };
+      },
+    };
+    const stubEngine = {
+      importers: () => ({ results: [], count: 0 }),
+      outline: () => ({ results: [] }),
+      callers: () => ({ results: [{ callers: [] }] }),
+    };
+    const resp = dispatchPolicy(ev(), {
+      rootDir: tmpDir,
+      rules: [rule],
+      queryEngine: stubEngine,
+    });
+    expect(resp.decision).toBe('allow');
+    expect(captured.hasEngine).toBe(true);
+  });
+
+  it('does not set ctx.queryEngine when options.queryEngine is undefined', () => {
+    const captured: { hasEngine: boolean } = { hasEngine: true };
+    const rule: PolicyRule = {
+      name: 'capture',
+      evaluate: (_event, ctx) => {
+        captured.hasEngine = ctx.queryEngine !== undefined;
+        return { decision: 'allow', rule: 'capture' };
+      },
+    };
+    dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(captured.hasEngine).toBe(false);
+  });
 });
