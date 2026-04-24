@@ -6,6 +6,7 @@ import { dispatchPolicy } from '../src/policy/dispatcher.js';
 import { openDatabase, applySchema } from '../src/db/schema.js';
 import { NexusStore } from '../src/db/store.js';
 import type { PolicyRule, PolicyEvent } from '../src/policy/types.js';
+import { DEFAULT_RULES } from '../src/policy/index.js';
 
 let tmpDir: string;
 
@@ -125,6 +126,47 @@ describe('dispatchPolicy', () => {
     };
     const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
     expect(resp.decision).toBe('deny');
+    expect(resp.additional_context).toBeUndefined();
+  });
+});
+
+describe('dispatchPolicy with DEFAULT_RULES', () => {
+  it('Grep event still routes to grep-on-code', () => {
+    const resp = dispatchPolicy(ev('Grep', { pattern: 'foo' }), {
+      rootDir: tmpDir,
+      rules: DEFAULT_RULES,
+    });
+    expect(resp.decision).toBe('deny');
+    expect(resp.rule).toBe('grep-on-code');
+  });
+
+  it('Read on package.json routes to read-on-structured with ask', () => {
+    const resp = dispatchPolicy(
+      ev('Read', { file_path: 'package.json' }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('ask');
+    expect(resp.rule).toBe('read-on-structured');
+    expect(resp.reason).toMatch(/nexus_structured_query|nexus_structured_outline/);
+  });
+
+  it('bare Read on src/foo.ts routes to read-on-source with allow+context', () => {
+    const resp = dispatchPolicy(
+      ev('Read', { file_path: 'src/foo.ts' }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('allow');
+    expect(resp.rule).toBe('read-on-source');
+    expect(resp.additional_context).toMatch(/nexus_outline/);
+  });
+
+  it('paged Read on src/foo.ts falls through to default allow (no rule)', () => {
+    const resp = dispatchPolicy(
+      ev('Read', { file_path: 'src/foo.ts', offset: 0 }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('allow');
+    expect(resp.rule).toBeUndefined();
     expect(resp.additional_context).toBeUndefined();
   });
 });
