@@ -30,9 +30,58 @@ export interface PolicyResponse {
   stale_hint: boolean;
 }
 
+export interface OutlineEntryForImpact {
+  name: string;
+  kind: string;
+  line: number;
+  /**
+   * Real QueryEngine marks end_line optional on OutlineEntry. Rules that need
+   * it (notably preedit-impact) must skip entries where it's missing.
+   */
+  end_line?: number;
+  children?: OutlineEntryForImpact[];
+}
+
+export interface OutlineForImpact {
+  file: string;
+  exports: string[];
+  outline: OutlineEntryForImpact[];
+}
+
+/**
+ * Minimal surface of QueryEngine consumed by the preedit-impact rule.
+ * Narrower than the real class so tests can stub without a DB. The real
+ * QueryEngine satisfies this structurally (its return envelopes already
+ * have `results` + `count`).
+ */
+export interface QueryEngineLike {
+  importers(source: string): {
+    results: { file: string }[];
+    count: number;
+  };
+  outline(filePath: string): {
+    results: OutlineForImpact[];
+  };
+  /**
+   * Returns one result per distinct caller. The rule uses the envelope `count`
+   * (total distinct callers) for risk bucketing, not the per-caller
+   * `caller_count` field that may live inside each result.
+   */
+  callers(
+    name: string,
+    opts?: { file?: string; limit?: number },
+  ): {
+    results: unknown[];
+    count: number;
+  };
+}
+
 export interface PolicyContext {
   rootDir: string;
   dbPath: string;
+  /** Optional DB-backed query engine. Rules that need DB access must
+   *  fall open (return null) when this is undefined. */
+  queryEngine?: QueryEngineLike;
 }
 
 export interface PolicyRule {
