@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import { runIndex } from '../src/index/orchestrator.js';
 
 const ENTRY = path.resolve('dist/transports/policy-entry.js');
 
@@ -108,5 +110,63 @@ describe('policy-entry', () => {
     const parsed = JSON.parse(result.stdout);
     expect(parsed.decision).toBe('allow');
     expect(parsed.additional_context).toBeUndefined();
+  });
+
+  it('injects a real QueryEngine for Edit events when .nexus/index.db exists', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-pe-c1-'));
+    fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmp, 'src', 'bar.ts'),
+      'export function foo() {\n  return 1;\n}\n',
+    );
+    fs.writeFileSync(
+      path.join(tmp, 'src', 'a.ts'),
+      "import { foo } from './bar';\nfoo();\n",
+    );
+    // Build a real index (creates .nexus/index.db under tmp).
+    runIndex(tmp);
+
+    const result = run(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: {
+          file_path: path.join(tmp, 'src', 'bar.ts'),
+          old_string: 'return 1;',
+        },
+      },
+      tmp,
+    );
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('allow');
+    expect(parsed.rule).toBe('preedit-impact');
+    expect(parsed.additional_context).toMatch(/foo/);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('falls open (silent allow) for Edit when .nexus/index.db is missing', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-pe-c1-nodb-'));
+    fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'src', 'bar.ts'), 'export function foo() {}\n');
+
+    const result = run(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: {
+          file_path: path.join(tmp, 'src', 'bar.ts'),
+          old_string: 'export function foo',
+        },
+      },
+      tmp,
+    );
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('allow');
+    expect(parsed.rule).toBeUndefined();
+
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 });

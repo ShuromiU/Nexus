@@ -12,10 +12,13 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { detectRoot } from '../workspace/detector.js';
 import { dispatchPolicy } from '../policy/dispatcher.js';
 import { DEFAULT_RULES } from '../policy/index.js';
-import type { PolicyEvent, PolicyResponse } from '../policy/types.js';
+import type { PolicyEvent, PolicyResponse, QueryEngineLike } from '../policy/types.js';
+import { openDatabase } from '../db/schema.js';
+import { QueryEngine } from '../query/engine.js';
 
 function readStdinSync(): string {
   try {
@@ -55,6 +58,17 @@ function parseEvent(raw: string): PolicyEvent | null {
   }
 }
 
+function tryOpenEngine(rootDir: string): QueryEngineLike | undefined {
+  try {
+    const dbPath = path.join(rootDir, '.nexus', 'index.db');
+    if (!fs.existsSync(dbPath)) return undefined;
+    const db = openDatabase(dbPath, { readonly: true });
+    return new QueryEngine(db) as unknown as QueryEngineLike;
+  } catch {
+    return undefined;
+  }
+}
+
 function main(): void {
   const raw = readStdinSync();
   const event = parseEvent(raw);
@@ -78,7 +92,13 @@ function main(): void {
     rootDir = cwd;
   }
 
-  const response = dispatchPolicy(event, { rootDir, rules: DEFAULT_RULES });
+  const queryEngine = tryOpenEngine(rootDir);
+
+  const response = dispatchPolicy(event, {
+    rootDir,
+    rules: DEFAULT_RULES,
+    ...(queryEngine ? { queryEngine } : {}),
+  });
   process.stdout.write(JSON.stringify(response));
 }
 
