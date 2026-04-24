@@ -31,6 +31,21 @@ describe('policy types', () => {
     expect(resp.stale_hint).toBe(false);
   });
 
+  it('PolicyDecision and PolicyResponse accept optional additional_context', () => {
+    const decision: PolicyDecision = {
+      decision: 'allow',
+      rule: 'x',
+      additional_context: 'use nexus_outline',
+    };
+    const resp: PolicyResponse = {
+      decision: 'allow',
+      stale_hint: false,
+      additional_context: 'use nexus_outline',
+    };
+    expect(decision.additional_context).toBe('use nexus_outline');
+    expect(resp.additional_context).toBe('use nexus_outline');
+  });
+
   it('PolicyRule has name + evaluate signature', () => {
     const rule: PolicyRule = {
       name: 'test-rule',

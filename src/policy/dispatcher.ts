@@ -28,6 +28,9 @@ export function dispatchPolicy(event: PolicyEvent, opts: DispatchOptions): Polic
       decision: decision.decision,
       reason: decision.reason,
       rule: decision.rule,
+      ...(decision.additional_context && decision.decision !== 'deny'
+        ? { additional_context: decision.additional_context }
+        : {}),
       stale_hint: computeStaleHint({
         rootDir: opts.rootDir,
         touchedAbsPath: extractTouchedPath(event, opts.rootDir),

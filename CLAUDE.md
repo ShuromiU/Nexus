@@ -106,3 +106,8 @@ Every tool accepts an optional `compact: true` flag that returns a minimal-key e
 - **`nexus_lockfile_deps(file, name?)`** — List `{name, version}` entries from a lockfile. Supported: `yarn.lock`, `package-lock.json` (v1/v2/v3), `pnpm-lock.yaml` (v6+ and legacy keys, peer-dep suffixes stripped), `Cargo.lock`. Optional `name` filters to all versions of one package. Over-cap → `error: 'file_too_large'` with 20 MB limit.
 
 **Policy transport:** `nexus_policy_check` — evaluate a Claude Code hook event against the Nexus policy layer. Dedicated `nexus-policy-check` bin for the PreToolUse hot path (no CLI spin-up, no reindex). Every response carries `stale_hint`. See `src/policy/` for rules.
+
+Shipped rules:
+- `grep-on-code` — denies `Grep` on code paths; allows `Grep` on docs/lockfiles/node_modules.
+- `read-on-structured` — asks before `Read` on structured configs and lockfiles; suggests `nexus_structured_query`/`nexus_structured_outline` or `nexus_lockfile_deps`.
+- `read-on-source` — allows bare `Read` on indexed source files but adds `additionalContext` nudging `nexus_outline`/`nexus_source`.

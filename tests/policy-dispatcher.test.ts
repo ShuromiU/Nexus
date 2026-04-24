@@ -6,6 +6,7 @@ import { dispatchPolicy } from '../src/policy/dispatcher.js';
 import { openDatabase, applySchema } from '../src/db/schema.js';
 import { NexusStore } from '../src/db/store.js';
 import type { PolicyRule, PolicyEvent } from '../src/policy/types.js';
+import { DEFAULT_RULES } from '../src/policy/index.js';
 
 let tmpDir: string;
 
@@ -82,5 +83,90 @@ describe('dispatchPolicy', () => {
     // does not exist, so hint should be false (cannot-disprove-freshness case).
     expect(resp.decision).toBe('allow');
     expect(resp.stale_hint).toBe(false);
+  });
+
+  it('forwards additional_context on allow', () => {
+    const rule: PolicyRule = {
+      name: 'A',
+      evaluate: () => ({
+        decision: 'allow',
+        rule: 'A',
+        additional_context: 'try nexus_outline',
+      }),
+    };
+    const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(resp.decision).toBe('allow');
+    expect(resp.additional_context).toBe('try nexus_outline');
+  });
+
+  it('forwards additional_context on ask', () => {
+    const rule: PolicyRule = {
+      name: 'A',
+      evaluate: () => ({
+        decision: 'ask',
+        rule: 'A',
+        additional_context: 'prefer nexus_structured_query',
+        reason: 'use structured',
+      }),
+    };
+    const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(resp.decision).toBe('ask');
+    expect(resp.additional_context).toBe('prefer nexus_structured_query');
+  });
+
+  it('drops additional_context on deny', () => {
+    const rule: PolicyRule = {
+      name: 'A',
+      evaluate: () => ({
+        decision: 'deny',
+        rule: 'A',
+        additional_context: 'would be inappropriate here',
+        reason: 'nope',
+      }),
+    };
+    const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(resp.decision).toBe('deny');
+    expect(resp.additional_context).toBeUndefined();
+  });
+});
+
+describe('dispatchPolicy with DEFAULT_RULES', () => {
+  it('Grep event still routes to grep-on-code', () => {
+    const resp = dispatchPolicy(ev('Grep', { pattern: 'foo' }), {
+      rootDir: tmpDir,
+      rules: DEFAULT_RULES,
+    });
+    expect(resp.decision).toBe('deny');
+    expect(resp.rule).toBe('grep-on-code');
+  });
+
+  it('Read on package.json routes to read-on-structured with ask', () => {
+    const resp = dispatchPolicy(
+      ev('Read', { file_path: 'package.json' }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('ask');
+    expect(resp.rule).toBe('read-on-structured');
+    expect(resp.reason).toMatch(/nexus_structured_query|nexus_structured_outline/);
+  });
+
+  it('bare Read on src/foo.ts routes to read-on-source with allow+context', () => {
+    const resp = dispatchPolicy(
+      ev('Read', { file_path: 'src/foo.ts' }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('allow');
+    expect(resp.rule).toBe('read-on-source');
+    expect(resp.additional_context).toMatch(/nexus_outline/);
+  });
+
+  it('paged Read on src/foo.ts falls through to default allow (no rule)', () => {
+    const resp = dispatchPolicy(
+      ev('Read', { file_path: 'src/foo.ts', offset: 0 }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('allow');
+    expect(resp.rule).toBeUndefined();
+    expect(resp.additional_context).toBeUndefined();
   });
 });

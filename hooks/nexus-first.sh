@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # nexus-first.sh — Claude Code PreToolUse hook
 #
-# Enforces "use Nexus before Grep/Explore" policy:
+# Enforces "use Nexus before Grep/Explore/Read" policy:
 #   • Grep on code files          → denied (use nexus_search/nexus_grep instead)
 #   • Glob for file discovery     → allowed (Nexus is for symbols, not file globs)
 #   • Explore subagents           → denied unless prompt mentions a nexus_* tool
 #   • Agent spawns                → denied unless prompt or description mentions Nexus
+#   • Read on structured config   → asks (suggests nexus_structured_query/outline or nexus_lockfile_deps)
+#   • Read on indexed source      → allowed with additionalContext nudging nexus_outline/source
 #
 # Allow-list:
 #   • Grep on .md/.json/.yaml/.toml/.env/.lock/etc
 #   • Grep on docs/, .git, node_modules, .nexus, .claude
 #   • Agents whose description starts with non-code words (commit, deploy, build, …)
+#   • Paged Read (with offset or limit) — silent allow
 #
 # Disable temporarily:  NEXUS_FIRST_DISABLED=1
 #
@@ -19,7 +22,7 @@
 #   2. Add to ~/.claude/settings.json under "hooks":
 #        "PreToolUse": [
 #          {
-#            "matcher": "Grep|Glob|Agent",
+#            "matcher": "Grep|Glob|Agent|Read",
 #            "hooks": [
 #              { "type": "command",
 #                "command": "bash -c 'source ~/.bashrc && bash ~/.claude/hooks/nexus-first.sh'" }
@@ -114,6 +117,51 @@ if [ "$TOOL_NAME" = "Agent" ]; then
       "permissionDecisionReason": "BLOCKED: Agent spawns MUST include Nexus instructions. Add to the prompt: \"Use Nexus MCP tools (nexus_find, nexus_refs, nexus_search, nexus_grep, nexus_outline, nexus_source, nexus_slice, nexus_deps, nexus_callers, nexus_pack, nexus_changed, nexus_diff_outline, nexus_signatures, nexus_doc, nexus_kind_index, nexus_unused_exports, nexus_definition_at, nexus_tree, nexus_stats, nexus_batch) instead of Grep for all code searches.\" The agent has MCP access but will not use Nexus unless explicitly told."
     }
   }'
+  exit 0
+fi
+
+# ── Read: delegate to nexus-policy-check ─────────────────────────────
+if [ "$TOOL_NAME" = "Read" ]; then
+  # Find the policy binary. Prefer a binary on PATH (global install or npx cache),
+  # fall back to npx (local node_modules/.bin when run inside the Nexus repo).
+  if command -v nexus-policy-check >/dev/null 2>&1; then
+    DECISION=$(echo "$INPUT" | nexus-policy-check)
+  else
+    DECISION=$(echo "$INPUT" | npx --no-install nexus-policy-check 2>/dev/null)
+  fi
+
+  # Fail open if the bin was not available or did not produce output — never
+  # block on infra failures.
+  if [ -z "$DECISION" ]; then
+    exit 0
+  fi
+
+  PERMISSION=$(echo "$DECISION" | jq -r '.decision // "allow"')
+  REASON=$(echo "$DECISION" | jq -r '.reason // ""')
+  CONTEXT=$(echo "$DECISION" | jq -r '.additional_context // ""')
+
+  if [ "$PERMISSION" = "ask" ]; then
+    jq -n --arg reason "$REASON" '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "ask",
+        permissionDecisionReason: $reason
+      }
+    }'
+    exit 0
+  fi
+
+  if [ "$PERMISSION" = "allow" ] && [ -n "$CONTEXT" ]; then
+    jq -n --arg ctx "$CONTEXT" '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        additionalContext: $ctx
+      }
+    }'
+    exit 0
+  fi
+
   exit 0
 fi
 

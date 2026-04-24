@@ -62,4 +62,51 @@ describe('policy-entry', () => {
     expect(parsed.decision).toBe('allow');
     expect(parsed.rule).toBe('parse-error');
   });
+
+  it('asks for Read on package.json with structured-tool suggestion', () => {
+    const result = run({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Read',
+      tool_input: { file_path: 'package.json' },
+    });
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('ask');
+    expect(parsed.rule).toBe('read-on-structured');
+    expect(parsed.reason).toMatch(/nexus_structured_query|nexus_structured_outline/);
+  });
+
+  it('asks for Read on yarn.lock with lockfile suggestion', () => {
+    const result = run({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Read',
+      tool_input: { file_path: 'yarn.lock' },
+    });
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('ask');
+    expect(parsed.reason).toMatch(/nexus_lockfile_deps/);
+  });
+
+  it('allows bare Read on a source file with additional_context', () => {
+    const result = run({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Read',
+      tool_input: { file_path: 'src/index.ts' },
+    });
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('allow');
+    expect(parsed.rule).toBe('read-on-source');
+    expect(parsed.additional_context).toMatch(/nexus_outline/);
+  });
+
+  it('allows paged Read without additional_context', () => {
+    const result = run({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Read',
+      tool_input: { file_path: 'src/index.ts', offset: 0, limit: 100 },
+    });
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('allow');
+    expect(parsed.additional_context).toBeUndefined();
+  });
 });

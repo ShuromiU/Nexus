@@ -417,6 +417,33 @@ describe('nexus_policy_check tool', () => {
     expect(payload.results[0].ok).toBe(true);
     expect(payload.results[0].result.results[0].decision).toBe('allow');
   });
+
+  it('asks for Read on a structured file', async () => {
+    const result = await callTool('nexus_policy_check', {
+      event: {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: 'package.json' },
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.results[0].decision).toBe('ask');
+    expect(payload.results[0].rule).toBe('read-on-structured');
+  });
+
+  it('allows bare Read on a source file with additional_context', async () => {
+    const result = await callTool('nexus_policy_check', {
+      event: {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: 'src/index.ts' },
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.results[0].decision).toBe('allow');
+    expect(payload.results[0].rule).toBe('read-on-source');
+    expect(payload.results[0].additional_context).toMatch(/nexus_outline/);
+  });
 });
 
 describe('nexus_lockfile_deps tool', () => {
