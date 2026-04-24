@@ -164,18 +164,19 @@ describe('summarizeEditImpact', () => {
     expect(s).toMatch(/\+2 more/);
   });
 
-  it('caps total length at SUMMARY_MAX_CHARS', async () => {
+  it('caps total length at SUMMARY_MAX_CHARS and appends "…"', async () => {
     const { summarizeEditImpact, SUMMARY_MAX_CHARS } = await import('../src/policy/impact.js');
     const impact = {
-      symbol: 'averyverylongsymbolname',
-      file: 'src/path/to/some/deeply/nested/module/file.ts',
-      importers: Array.from({ length: 100 }, (_, i) => `src/importer-number-${i}.ts`),
-      importerCount: 100,
-      callerCount: 200,
+      symbol: 'x'.repeat(400),
+      file: 'y'.repeat(400),
+      importers: ['src/a.ts'],
+      importerCount: 1,
+      callerCount: 1,
       risk: 'high' as const,
     };
     const s = summarizeEditImpact(impact);
-    expect(s.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
+    expect(s.length).toBe(SUMMARY_MAX_CHARS);
+    expect(s.endsWith('…')).toBe(true);
   });
 });
 

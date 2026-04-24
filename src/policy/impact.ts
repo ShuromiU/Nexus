@@ -72,7 +72,7 @@ export interface WriteImpact {
  * Guaranteed ≤ SUMMARY_MAX_CHARS; trailing "…" is appended if truncated.
  */
 export function summarizeEditImpact(impact: EditImpact): string {
-  const head = `Editing exported symbol \`${impact.symbol}\` in \`${impact.file}\` (risk: ${impact.risk}).`;
+  const head = `⚠️ Editing exported symbol \`${impact.symbol}\` in \`${impact.file}\` (risk: ${impact.risk}).`;
 
   let importerClause = '';
   if (impact.importerCount > 0) {
@@ -94,13 +94,13 @@ export function summarizeEditImpact(impact: EditImpact): string {
  * an existing file. Lists the top-3 affected symbols by caller count.
  */
 export function summarizeWriteImpact(impact: WriteImpact): string {
-  const head = `Rewriting ${impact.file} replaces ${impact.affectedSymbols.length} exported symbol(s) (max risk: ${impact.risk}).`;
+  const head = `⚠️ Rewriting ${impact.file} replaces ${impact.affectedSymbols.length} exported symbol(s) (max risk: ${impact.risk}).`;
 
   const top = impact.affectedSymbols
     .slice()
     .sort((a, b) => b.callerCount - a.callerCount)
     .slice(0, 3)
-    .map(s => `\`${s.name}\` (${s.callerCount} callers)`)
+    .map(s => `\`${s.name}\` (${s.callerCount} caller${s.callerCount === 1 ? '' : 's'})`)
     .join(', ');
   const topClause = top.length > 0 ? ` Top by callers: ${top}.` : '';
 
