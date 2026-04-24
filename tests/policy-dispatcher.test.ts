@@ -83,4 +83,48 @@ describe('dispatchPolicy', () => {
     expect(resp.decision).toBe('allow');
     expect(resp.stale_hint).toBe(false);
   });
+
+  it('forwards additional_context on allow', () => {
+    const rule: PolicyRule = {
+      name: 'A',
+      evaluate: () => ({
+        decision: 'allow',
+        rule: 'A',
+        additional_context: 'try nexus_outline',
+      }),
+    };
+    const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(resp.decision).toBe('allow');
+    expect(resp.additional_context).toBe('try nexus_outline');
+  });
+
+  it('forwards additional_context on ask', () => {
+    const rule: PolicyRule = {
+      name: 'A',
+      evaluate: () => ({
+        decision: 'ask',
+        rule: 'A',
+        additional_context: 'prefer nexus_structured_query',
+        reason: 'use structured',
+      }),
+    };
+    const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(resp.decision).toBe('ask');
+    expect(resp.additional_context).toBe('prefer nexus_structured_query');
+  });
+
+  it('drops additional_context on deny', () => {
+    const rule: PolicyRule = {
+      name: 'A',
+      evaluate: () => ({
+        decision: 'deny',
+        rule: 'A',
+        additional_context: 'would be inappropriate here',
+        reason: 'nope',
+      }),
+    };
+    const resp = dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(resp.decision).toBe('deny');
+    expect(resp.additional_context).toBeUndefined();
+  });
 });
