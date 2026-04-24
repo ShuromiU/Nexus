@@ -568,7 +568,14 @@ export function createMcpServer(): Server {
     const typedEvent = event as PolicyEvent;
     const rootDir = indexRootDir ?? process.cwd();
     const t0 = Date.now();
-    const response = dispatchPolicy(typedEvent, { rootDir, rules: DEFAULT_RULES });
+    let queryEngine: import('../policy/types.js').QueryEngineLike | undefined;
+    try {
+      queryEngine = getEngine() as unknown as import('../policy/types.js').QueryEngineLike;
+    } catch {
+      // Engine not yet initialized (e.g., in tests). Policy dispatch will work without it, but
+      // some rules that require the engine may return 'noop'. This is acceptable.
+    }
+    const response = dispatchPolicy(typedEvent, { rootDir, rules: DEFAULT_RULES, queryEngine });
     const timing_ms = Date.now() - t0;
     return {
       type: 'policy_check',

@@ -169,4 +169,78 @@ describe('dispatchPolicy with DEFAULT_RULES', () => {
     expect(resp.rule).toBeUndefined();
     expect(resp.additional_context).toBeUndefined();
   });
+
+  it('forwards queryEngine into ctx when provided in options', () => {
+    const captured: { hasEngine: boolean } = { hasEngine: false };
+    const rule: PolicyRule = {
+      name: 'capture',
+      evaluate: (_event, ctx) => {
+        captured.hasEngine = ctx.queryEngine !== undefined;
+        return { decision: 'allow', rule: 'capture' };
+      },
+    };
+    const stubEngine = {
+      importers: () => ({ results: [], count: 0 }),
+      outline: () => ({ results: [] }),
+      callers: () => ({ results: [{ callers: [] }] }),
+    };
+    const resp = dispatchPolicy(ev(), {
+      rootDir: tmpDir,
+      rules: [rule],
+      queryEngine: stubEngine,
+    });
+    expect(resp.decision).toBe('allow');
+    expect(captured.hasEngine).toBe(true);
+  });
+
+  it('does not set ctx.queryEngine when options.queryEngine is undefined', () => {
+    const captured: { hasEngine: boolean } = { hasEngine: true };
+    const rule: PolicyRule = {
+      name: 'capture',
+      evaluate: (_event, ctx) => {
+        captured.hasEngine = ctx.queryEngine !== undefined;
+        return { decision: 'allow', rule: 'capture' };
+      },
+    };
+    dispatchPolicy(ev(), { rootDir: tmpDir, rules: [rule] });
+    expect(captured.hasEngine).toBe(false);
+  });
+
+  it('Edit on indexed source + importer + exported top-level routes to preedit-impact', () => {
+    fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+    const abs = path.join(tmpDir, 'src', 'bar.ts');
+    fs.writeFileSync(abs, 'export function foo() {\n  return 1;\n}\n');
+    const stubEngine = {
+      importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      outline: () => ({
+        results: [
+          {
+            file: 'src/bar.ts',
+            exports: ['foo'],
+            outline: [{ name: 'foo', kind: 'function', line: 1, end_line: 3 }],
+          },
+        ],
+      }),
+      callers: () => ({ results: [{ callers: new Array(4) }] }),
+    };
+    const resp = dispatchPolicy(
+      ev('Edit', { file_path: abs, old_string: 'return 1;' }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES, queryEngine: stubEngine },
+    );
+    expect(resp.decision).toBe('allow');
+    expect(resp.rule).toBe('preedit-impact');
+    expect(resp.additional_context).toMatch(/foo/);
+  });
+
+  it('Edit with no queryEngine in options falls open (no rule fires)', () => {
+    fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+    const abs = path.join(tmpDir, 'src', 'bar.ts');
+    fs.writeFileSync(abs, 'export function foo() {}\n');
+    const resp = dispatchPolicy(
+      ev('Edit', { file_path: abs, old_string: 'export function foo' }),
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('allow');
+    expect(resp.rule).toBeUndefined();
+  });
 });

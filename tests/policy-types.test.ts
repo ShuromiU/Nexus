@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import type {
+  PolicyContext,
   PolicyEvent,
   PolicyDecision,
   PolicyResponse,
   PolicyRule,
+  QueryEngineLike,
+  OutlineForImpact,
+  OutlineEntryForImpact,
 } from '../src/policy/types.js';
 
 describe('policy types', () => {
@@ -52,5 +56,45 @@ describe('policy types', () => {
       evaluate: () => null,
     };
     expect(rule.name).toBe('test-rule');
+  });
+
+  it('PolicyContext accepts an optional QueryEngineLike', () => {
+    const stubEngine: QueryEngineLike = {
+      importers: () => ({ results: [], count: 0 }),
+      outline: () => ({ results: [] }),
+      callers: () => ({ results: [{ callers: [] }] }),
+    };
+    const ctx: PolicyContext = {
+      rootDir: '/tmp',
+      dbPath: '/tmp/.nexus/index.db',
+      queryEngine: stubEngine,
+    };
+    expect(ctx.queryEngine).toBeDefined();
+  });
+
+  it('OutlineForImpact and OutlineEntryForImpact compile as expected', () => {
+    const entry: OutlineEntryForImpact = {
+      name: 'foo',
+      kind: 'function',
+      line: 10,
+      end_line: 20,
+    };
+    const outline: OutlineForImpact = {
+      file: 'src/bar.ts',
+      exports: ['foo'],
+      outline: [entry],
+    };
+    expect(outline.outline[0].name).toBe('foo');
+  });
+
+  it('QueryEngineLike methods return the expected envelope shape', () => {
+    const engine: QueryEngineLike = {
+      importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      outline: () => ({ results: [{ file: 'src/b.ts', exports: [], outline: [] }] }),
+      callers: (_name, _opts) => ({ results: [{ callers: [] }] }),
+    };
+    expect(engine.importers('src/b.ts').count).toBe(1);
+    expect(engine.outline('src/b.ts').results.length).toBe(1);
+    expect(engine.callers('foo', { file: 'src/b.ts', limit: 50 }).results[0].callers.length).toBe(0);
   });
 });

@@ -111,3 +111,4 @@ Shipped rules:
 - `grep-on-code` — denies `Grep` on code paths; allows `Grep` on docs/lockfiles/node_modules.
 - `read-on-structured` — asks before `Read` on structured configs and lockfiles; suggests `nexus_structured_query`/`nexus_structured_outline` or `nexus_lockfile_deps`.
 - `read-on-source` — allows bare `Read` on indexed source files but adds `additionalContext` nudging `nexus_outline`/`nexus_source`.
+- `preedit-impact` — on `Edit`/`Write` events against an exported top-level symbol of an indexed source file with ≥1 known importer, emits `allow + additionalContext` summarizing importer count, caller count, and bucketed risk (`low`/`medium`/`high`). Never blocks. Falls open when the DB is unavailable.

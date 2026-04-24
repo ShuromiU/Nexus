@@ -444,6 +444,27 @@ describe('nexus_policy_check tool', () => {
     expect(payload.results[0].rule).toBe('read-on-source');
     expect(payload.results[0].additional_context).toMatch(/nexus_outline/);
   });
+
+  it('returns allow for an Edit event on an indexed source file (smoke test)', async () => {
+    const result = await callTool('nexus_policy_check', {
+      event: {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: {
+          file_path: 'src/index.ts',
+          old_string: "export { openDatabase",
+        },
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    // Either the Edit was dispatched and preedit-impact fired (allow + rule),
+    // or it fell through to plain allow. Both are structurally OK — the key
+    // assertion is that dispatching an Edit event does not throw and returns
+    // a well-formed response with decision='allow'.
+    expect(payload.results[0].decision).toBe('allow');
+    expect(typeof payload.results[0].stale_hint).toBe('boolean');
+    expect(['current', 'stale']).toContain(payload.index_status);
+  });
 });
 
 describe('nexus_lockfile_deps tool', () => {

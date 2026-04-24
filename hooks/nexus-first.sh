@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # nexus-first.sh — Claude Code PreToolUse hook
 #
-# Enforces "use Nexus before Grep/Explore/Read" policy:
+# Enforces "use Nexus before Grep/Explore/Read/Edit/Write" policy:
 #   • Grep on code files          → denied (use nexus_search/nexus_grep instead)
 #   • Glob for file discovery     → allowed (Nexus is for symbols, not file globs)
 #   • Explore subagents           → denied unless prompt mentions a nexus_* tool
 #   • Agent spawns                → denied unless prompt or description mentions Nexus
 #   • Read on structured config   → asks (suggests nexus_structured_query/outline or nexus_lockfile_deps)
 #   • Read on indexed source      → allowed with additionalContext nudging nexus_outline/source
+#   • Edit / Write on exported
+#     indexed source              → allowed with additionalContext summarizing impact
 #
 # Allow-list:
 #   • Grep on .md/.json/.yaml/.toml/.env/.lock/etc
@@ -22,7 +24,7 @@
 #   2. Add to ~/.claude/settings.json under "hooks":
 #        "PreToolUse": [
 #          {
-#            "matcher": "Grep|Glob|Agent|Read",
+#            "matcher": "Grep|Glob|Agent|Read|Edit|Write",
 #            "hooks": [
 #              { "type": "command",
 #                "command": "bash -c 'source ~/.bashrc && bash ~/.claude/hooks/nexus-first.sh'" }
@@ -150,6 +152,37 @@ if [ "$TOOL_NAME" = "Read" ]; then
     }'
     exit 0
   fi
+
+  if [ "$PERMISSION" = "allow" ] && [ -n "$CONTEXT" ]; then
+    jq -n --arg ctx "$CONTEXT" '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        additionalContext: $ctx
+      }
+    }'
+    exit 0
+  fi
+
+  exit 0
+fi
+
+# ── Edit / Write: delegate to nexus-policy-check ─────────────────────
+if [ "$TOOL_NAME" = "Edit" ] || [ "$TOOL_NAME" = "Write" ]; then
+  if command -v nexus-policy-check >/dev/null 2>&1; then
+    DECISION=$(echo "$INPUT" | nexus-policy-check)
+  else
+    DECISION=$(echo "$INPUT" | npx --no-install nexus-policy-check 2>/dev/null)
+  fi
+
+  # Fail open if the bin was not available or did not produce output — never
+  # block on infra failures.
+  if [ -z "$DECISION" ]; then
+    exit 0
+  fi
+
+  PERMISSION=$(echo "$DECISION" | jq -r '.decision // "allow"')
+  CONTEXT=$(echo "$DECISION" | jq -r '.additional_context // ""')
 
   if [ "$PERMISSION" = "allow" ] && [ -n "$CONTEXT" ]; then
     jq -n --arg ctx "$CONTEXT" '{
