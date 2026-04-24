@@ -14,12 +14,19 @@ export interface PolicyDecision {
   decision: 'allow' | 'ask' | 'deny' | 'noop';
   reason?: string;
   rule?: string;
+  /**
+   * Optional advisory text forwarded to the assistant (via PreToolUse
+   * `additionalContext`). Only meaningful when `decision` is `allow` or
+   * `ask`; the dispatcher drops it on `deny`/`noop`.
+   */
+  additional_context?: string;
 }
 
 export interface PolicyResponse {
   decision: PolicyDecision['decision'];
   reason?: string;
   rule?: string;
+  additional_context?: string;
   stale_hint: boolean;
 }
 
