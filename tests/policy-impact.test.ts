@@ -114,3 +114,115 @@ describe('bucketRisk', () => {
     expect(bucketRisk(50)).toBe('high');
   });
 });
+
+describe('summarizeEditImpact', () => {
+  it('includes symbol, file, risk bucket, importer count, caller count, and the nexus_callers hint', async () => {
+    const { summarizeEditImpact, SUMMARY_MAX_CHARS } = await import('../src/policy/impact.js');
+    const impact = {
+      symbol: 'foo',
+      file: 'src/bar.ts',
+      importers: ['src/a.ts', 'src/b.ts'],
+      importerCount: 2,
+      callerCount: 6,
+      risk: 'medium' as const,
+    };
+    const s = summarizeEditImpact(impact);
+    expect(s).toMatch(/foo/);
+    expect(s).toMatch(/src\/bar\.ts/);
+    expect(s).toMatch(/medium/);
+    expect(s).toMatch(/2 file/);
+    expect(s).toMatch(/6 caller/);
+    expect(s).toMatch(/nexus_callers/);
+    expect(s.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
+  });
+
+  it('omits importer examples when importerCount is 0', async () => {
+    const { summarizeEditImpact } = await import('../src/policy/impact.js');
+    const impact = {
+      symbol: 'foo',
+      file: 'src/bar.ts',
+      importers: [],
+      importerCount: 0,
+      callerCount: 0,
+      risk: 'low' as const,
+    };
+    const s = summarizeEditImpact(impact);
+    expect(s).not.toMatch(/src\/a\.ts/);
+  });
+
+  it('adds "+N more" suffix when more than 3 importers', async () => {
+    const { summarizeEditImpact } = await import('../src/policy/impact.js');
+    const impact = {
+      symbol: 'foo',
+      file: 'src/bar.ts',
+      importers: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts'],
+      importerCount: 5,
+      callerCount: 0,
+      risk: 'low' as const,
+    };
+    const s = summarizeEditImpact(impact);
+    expect(s).toMatch(/\+2 more/);
+  });
+
+  it('caps total length at SUMMARY_MAX_CHARS', async () => {
+    const { summarizeEditImpact, SUMMARY_MAX_CHARS } = await import('../src/policy/impact.js');
+    const impact = {
+      symbol: 'averyverylongsymbolname',
+      file: 'src/path/to/some/deeply/nested/module/file.ts',
+      importers: Array.from({ length: 100 }, (_, i) => `src/importer-number-${i}.ts`),
+      importerCount: 100,
+      callerCount: 200,
+      risk: 'high' as const,
+    };
+    const s = summarizeEditImpact(impact);
+    expect(s.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
+  });
+});
+
+describe('summarizeWriteImpact', () => {
+  it('lists multi-symbol rewrite with max risk and top callers', async () => {
+    const { summarizeWriteImpact, SUMMARY_MAX_CHARS } = await import('../src/policy/impact.js');
+    const impact = {
+      file: 'src/bar.ts',
+      importers: ['src/a.ts'],
+      importerCount: 1,
+      affectedSymbols: [
+        { name: 'foo', callerCount: 6, risk: 'medium' as const },
+        { name: 'bar', callerCount: 2, risk: 'low' as const },
+        { name: 'baz', callerCount: 14, risk: 'high' as const },
+      ],
+      risk: 'high' as const,
+    };
+    const s = summarizeWriteImpact(impact);
+    expect(s).toMatch(/src\/bar\.ts/);
+    expect(s).toMatch(/3 exported/);
+    expect(s).toMatch(/high/);
+    expect(s).toMatch(/baz/);
+    expect(s).toMatch(/14/);
+    expect(s).toMatch(/nexus_callers/);
+    expect(s.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
+  });
+
+  it('truncates top-N affected symbols to at most 3', async () => {
+    const { summarizeWriteImpact } = await import('../src/policy/impact.js');
+    const impact = {
+      file: 'src/bar.ts',
+      importers: [],
+      importerCount: 1,
+      affectedSymbols: [
+        { name: 's1', callerCount: 10, risk: 'medium' as const },
+        { name: 's2', callerCount: 8, risk: 'medium' as const },
+        { name: 's3', callerCount: 6, risk: 'medium' as const },
+        { name: 's4', callerCount: 4, risk: 'medium' as const },
+        { name: 's5', callerCount: 2, risk: 'low' as const },
+      ],
+      risk: 'medium' as const,
+    };
+    const s = summarizeWriteImpact(impact);
+    expect(s).toMatch(/s1/);
+    expect(s).toMatch(/s2/);
+    expect(s).toMatch(/s3/);
+    expect(s).not.toMatch(/s4/);
+    expect(s).not.toMatch(/s5/);
+  });
+});

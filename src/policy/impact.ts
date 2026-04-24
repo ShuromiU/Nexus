@@ -46,3 +46,71 @@ export function bucketRisk(callerCount: number): RiskBucket {
   if (callerCount <= 10) return 'medium';
   return 'high';
 }
+
+export const SUMMARY_MAX_CHARS = 600;
+
+export interface EditImpact {
+  symbol: string;
+  file: string;
+  importers: string[];
+  importerCount: number;
+  callerCount: number;
+  risk: RiskBucket;
+}
+
+export interface WriteImpact {
+  file: string;
+  importers: string[];
+  importerCount: number;
+  affectedSymbols: { name: string; callerCount: number; risk: RiskBucket }[];
+  /** Max over affectedSymbols. */
+  risk: RiskBucket;
+}
+
+/**
+ * Build a human-readable one-paragraph summary for a single-symbol Edit.
+ * Guaranteed ≤ SUMMARY_MAX_CHARS; trailing "…" is appended if truncated.
+ */
+export function summarizeEditImpact(impact: EditImpact): string {
+  const head = `Editing exported symbol \`${impact.symbol}\` in \`${impact.file}\` (risk: ${impact.risk}).`;
+
+  let importerClause = '';
+  if (impact.importerCount > 0) {
+    const sample = impact.importers.slice(0, 3).map(f => `\`${f}\``).join(', ');
+    const extra = impact.importerCount > 3 ? `, +${impact.importerCount - 3} more` : '';
+    importerClause = ` ${impact.importerCount} file(s) import this module: ${sample}${extra};`;
+  } else {
+    importerClause = ` 0 files import this module;`;
+  }
+
+  const callerClause = ` ${impact.callerCount} caller(s) found.`;
+  const hint = ` Run nexus_callers('${impact.symbol}') for the full list.`;
+
+  return capSummary(`${head}${importerClause}${callerClause}${hint}`);
+}
+
+/**
+ * Build a human-readable summary for a Write that replaces every export in
+ * an existing file. Lists the top-3 affected symbols by caller count.
+ */
+export function summarizeWriteImpact(impact: WriteImpact): string {
+  const head = `Rewriting ${impact.file} replaces ${impact.affectedSymbols.length} exported symbol(s) (max risk: ${impact.risk}).`;
+
+  const top = impact.affectedSymbols
+    .slice()
+    .sort((a, b) => b.callerCount - a.callerCount)
+    .slice(0, 3)
+    .map(s => `\`${s.name}\` (${s.callerCount} callers)`)
+    .join(', ');
+  const topClause = top.length > 0 ? ` Top by callers: ${top}.` : '';
+
+  const importerClause = ` ${impact.importerCount} importer(s).`;
+  const hint = ` Run nexus_callers for any symbol to see full call sites.`;
+
+  return capSummary(`${head}${topClause}${importerClause}${hint}`);
+}
+
+function capSummary(s: string): string {
+  if (s.length <= SUMMARY_MAX_CHARS) return s;
+  return s.slice(0, SUMMARY_MAX_CHARS - 1) + '…';
+}
