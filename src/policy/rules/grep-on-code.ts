@@ -1,8 +1,8 @@
 import type { PolicyRule } from '../types.js';
+import { NON_CODE_PATH } from './common-paths.js';
 
 const NON_CODE_EXT = /\.(md|json|yaml|yml|toml|env|lock|txt|csv|html|xml|sql|sh|bat|cmd|log)$/i;
 const NON_CODE_TYPE = /^(md|json|yaml|yml|toml)$/i;
-const NON_CODE_PATH = /(node_modules|\.git|\.nexus|\/?docs\/|\.env|\.claude\/)/i;
 
 const DENY_REASON =
   'NEXUS ONLY: Use nexus_find, nexus_refs, nexus_search, or nexus_grep instead of Grep for code files. Grep is NOT allowed for code — use Nexus.';
