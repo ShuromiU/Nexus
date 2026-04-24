@@ -79,13 +79,13 @@ export interface QueryEngineLike {
     results: OutlineForImpact[];
   };
   /**
-   * Returns one result per distinct caller. The rule uses `count`
-   * (total distinct callers) for bucketing, not the per-caller
-   * `caller_count` field inside each result (which is #call-sites).
+   * Return envelope for "who calls `name`". The real `QueryEngine.callers`
+   * wraps a single `CallersResult` in a one-element array, so the envelope
+   * `count` is always 0 or 1 (NOT the distinct-caller count). Rules must
+   * compute the count from `results[0].callers.length`.
    */
   callers(name: string, opts?: { file?: string; limit?: number }): {
-    results: unknown[];
-    count: number;
+    results: { callers: unknown[] }[];
   };
 }
 
@@ -255,7 +255,8 @@ with `..` fallback).
 5. `findSymbolAtEdit(content, old_string, outline.results[0])`. If
    `null` OR `!exported` OR `!topLevel` → `null`.
 6. `ctx.queryEngine.callers(match.name, { file: relPath, limit: 50 })`
-   — `callerCount = result.count`. Partial failure (throws) → `callerCount = 0`.
+   — `callerCount = result.results[0]?.callers?.length ?? 0`.
+   Partial failure (throws) → `callerCount = 0`.
 7. Build `EditImpact`. Return `{ decision: 'allow', rule: 'preedit-impact',
    additional_context: summarizeEditImpact(impact) }`.
 
@@ -266,7 +267,8 @@ with `..` fallback).
 4. Filter `outline.outline` top-level entries to those in `outline.exports`.
    If list is empty → `null`.
 5. For each exported top-level name, call `callers(name, {file})` and
-   read `result.count` for the caller count. Aggregate.
+   read `result.results[0]?.callers?.length ?? 0` for the caller count.
+   Aggregate.
 6. Build `WriteImpact`. Return `{ decision: 'allow', rule: 'preedit-impact',
    additional_context: summarizeWriteImpact(impact) }`.
 
