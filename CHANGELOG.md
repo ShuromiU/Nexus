@@ -1,3 +1,18 @@
+## [Unreleased] — A5/C2 read-redirect (warning-first)
+
+### Added
+- **`read-on-structured` policy rule** — `Read` on a structured config file (`package.json`, `tsconfig.json`, `Cargo.toml`, GHA workflow YAML, generic JSON/YAML/TOML) returns `permissionDecision: ask` with a suggestion to use `nexus_structured_query` or `nexus_structured_outline`. Lockfiles (`yarn.lock`, `package-lock.json`, `pnpm-lock.yaml`, `Cargo.lock`) suggest `nexus_lockfile_deps`.
+- **`read-on-source` policy rule** — `Read` on an indexed source file with neither `offset` nor `limit` returns `permissionDecision: allow` with `additionalContext` nudging toward `nexus_outline` / `nexus_source`. Paging (`offset` or `limit` present) skips the rule.
+- **`additional_context?: string` field** on `PolicyDecision` and `PolicyResponse`. Dispatcher forwards it on `allow`/`ask` and drops it on `deny`/`noop`.
+- `hooks/nexus-first.sh` now handles `Read` events — install instructions updated to `"matcher": "Grep|Glob|Agent|Read"`.
+
+### Notes
+- Never hard-denies `Read`. Worst case is silent allow.
+- No DB access on the hot path — rules rely on `classifyPath()` plus existing `stale_hint`.
+- `.nexus.json` language overrides are intentionally not loaded on the hot path (resolving config would cost disk I/O per event). Custom extensions won't trigger the source rule until V4 adds a long-lived policy worker.
+
+---
+
 ## [Unreleased] — A3 P2 lockfile_deps
 
 ### Added
