@@ -240,3 +240,137 @@ describe('preeditImpactRule — Edit path', () => {
     expect(preeditImpactRule.evaluate(ev('Edit', {}), ctx)).toBeNull();
   });
 });
+
+describe('preeditImpactRule — Write path', () => {
+  it('returns null for Write on a non-existent file (new file)', () => {
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: makeEngine({
+        importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      }),
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Write', { file_path: path.join(tmpDir, 'src/new.ts'), content: 'x' }),
+      ctx,
+    );
+    expect(d).toBeNull();
+  });
+
+  it('returns null for Write on existing file with 0 importers', () => {
+    const abs = writeFile('src/bar.ts', 'export function foo() {}\n');
+    const outline: OutlineForImpact = {
+      file: 'src/bar.ts',
+      exports: ['foo'],
+      outline: [{ name: 'foo', kind: 'function', line: 1, end_line: 1 }],
+    };
+    const engine = makeEngine({
+      importers: () => ({ results: [], count: 0 }),
+      outline: () => ({ results: [outline] }),
+    });
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: engine,
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Write', { file_path: abs, content: 'new content' }),
+      ctx,
+    );
+    expect(d).toBeNull();
+  });
+
+  it('allows + lists top symbols for Write on existing source with multiple exports', () => {
+    const abs = writeFile(
+      'src/bar.ts',
+      'export function foo() {}\nexport function bar() {}\nexport function baz() {}\n',
+    );
+    const outline: OutlineForImpact = {
+      file: 'src/bar.ts',
+      exports: ['foo', 'bar', 'baz'],
+      outline: [
+        { name: 'foo', kind: 'function', line: 1, end_line: 1 },
+        { name: 'bar', kind: 'function', line: 2, end_line: 2 },
+        { name: 'baz', kind: 'function', line: 3, end_line: 3 },
+      ],
+    };
+    const callerCounts: Record<string, number> = { foo: 6, bar: 2, baz: 14 };
+    const engine = makeEngine({
+      importers: () => ({ results: [{ file: 'src/a.ts' }, { file: 'src/b.ts' }], count: 2 }),
+      outline: () => ({ results: [outline] }),
+      callers: (name) => ({ results: [{ callers: new Array(callerCounts[name] ?? 0) }] }),
+    });
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: engine,
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Write', { file_path: abs, content: 'new content' }),
+      ctx,
+    );
+    expect(d?.decision).toBe('allow');
+    expect(d?.rule).toBe('preedit-impact');
+    expect(d?.additional_context).toMatch(/3 exported/);
+    expect(d?.additional_context).toMatch(/high/);
+    expect(d?.additional_context).toMatch(/baz/);
+    expect(d?.additional_context).toMatch(/14/);
+  });
+
+  it('returns null for Write on existing source with importers but no exports', () => {
+    const abs = writeFile('src/bar.ts', 'function helper() {}\n');
+    const outline: OutlineForImpact = {
+      file: 'src/bar.ts',
+      exports: [],
+      outline: [{ name: 'helper', kind: 'function', line: 1, end_line: 1 }],
+    };
+    const engine = makeEngine({
+      importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      outline: () => ({ results: [outline] }),
+    });
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: engine,
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Write', { file_path: abs, content: 'new content' }),
+      ctx,
+    );
+    expect(d).toBeNull();
+  });
+
+  it('treats caller() throw as 0 callers for that symbol on Write', () => {
+    const abs = writeFile(
+      'src/bar.ts',
+      'export function foo() {}\nexport function bar() {}\n',
+    );
+    const outline: OutlineForImpact = {
+      file: 'src/bar.ts',
+      exports: ['foo', 'bar'],
+      outline: [
+        { name: 'foo', kind: 'function', line: 1, end_line: 1 },
+        { name: 'bar', kind: 'function', line: 2, end_line: 2 },
+      ],
+    };
+    const engine = makeEngine({
+      importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      outline: () => ({ results: [outline] }),
+      callers: (name) => {
+        if (name === 'foo') throw new Error('boom');
+        return { results: [{ callers: new Array(4) }] };
+      },
+    });
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: engine,
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Write', { file_path: abs, content: 'new content' }),
+      ctx,
+    );
+    expect(d?.decision).toBe('allow');
+    expect(d?.additional_context).toMatch(/bar/);
+  });
+});

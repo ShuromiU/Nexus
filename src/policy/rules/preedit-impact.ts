@@ -6,7 +6,10 @@ import {
   findSymbolAtEdit,
   bucketRisk,
   summarizeEditImpact,
+  summarizeWriteImpact,
   type EditImpact,
+  type WriteImpact,
+  type RiskBucket,
 } from '../impact.js';
 
 const EMPTY_CONFIG = { languages: {} };
@@ -42,7 +45,7 @@ export const preeditImpactRule: PolicyRule = {
     if (event.tool_name === 'Edit') {
       return evaluateEdit(event, ctx, relPath, absPath);
     }
-    return null; // Write branch added in Task 6
+    return evaluateWrite(ctx, relPath, absPath);
   },
 };
 
@@ -102,6 +105,71 @@ function evaluateEdit(
     rule: 'preedit-impact',
     additional_context: summarizeEditImpact(impact),
   };
+}
+
+function evaluateWrite(ctx: PolicyContext, relPath: string, absPath: string) {
+  try {
+    fs.statSync(absPath);
+  } catch {
+    return null; // new file: no prior importers by definition
+  }
+
+  const engine = ctx.queryEngine as QueryEngineLike;
+
+  let importers;
+  try {
+    importers = engine.importers(relPath);
+  } catch {
+    return null;
+  }
+  if (importers.count === 0) return null;
+
+  let outlineEnvelope;
+  try {
+    outlineEnvelope = engine.outline(relPath);
+  } catch {
+    return null;
+  }
+  const outline: OutlineForImpact | undefined = outlineEnvelope.results[0];
+  if (!outline) return null;
+
+  const exportedTopLevel = outline.outline.filter(e => outline.exports.includes(e.name));
+  if (exportedTopLevel.length === 0) return null;
+
+  const affectedSymbols = exportedTopLevel.map(entry => {
+    let callerCount = 0;
+    try {
+      const env = engine.callers(entry.name, { file: relPath, limit: 50 });
+      callerCount = env.results[0]?.callers?.length ?? 0;
+    } catch {
+      callerCount = 0;
+    }
+    return { name: entry.name, callerCount, risk: bucketRisk(callerCount) };
+  });
+
+  const maxRisk = affectedSymbols.reduce<RiskBucket>(
+    (acc, s) => riskMax(acc, s.risk),
+    'low',
+  );
+
+  const impact: WriteImpact = {
+    file: relPath,
+    importers: importers.results.map(r => r.file),
+    importerCount: importers.count,
+    affectedSymbols,
+    risk: maxRisk,
+  };
+
+  return {
+    decision: 'allow' as const,
+    rule: 'preedit-impact',
+    additional_context: summarizeWriteImpact(impact),
+  };
+}
+
+function riskMax(a: RiskBucket, b: RiskBucket): RiskBucket {
+  const rank: Record<RiskBucket, number> = { low: 0, medium: 1, high: 2 };
+  return rank[a] >= rank[b] ? a : b;
 }
 
 function readCapped(absPath: string): string | null {
