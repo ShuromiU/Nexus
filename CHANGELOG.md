@@ -1,3 +1,20 @@
+## [Unreleased] — C1 preedit-impact (warning-first)
+
+### Added
+- **`preedit-impact` policy rule** — `Edit` or `Write` on an exported top-level symbol of an indexed source file with ≥1 known importer returns `permissionDecision: allow` with `additionalContext` summarizing the impact: symbol name (Edit) or top-3 symbols by callers (Write), importer count, caller count, and bucketed risk (`low` / `medium` / `high`; thresholds 0-2 / 3-10 / 11+). Never blocks. Falls open when the DB is unavailable.
+- **`QueryEngineLike` abstraction** on `PolicyContext` — minimal surface (`importers`, `outline`, `callers`) so rules that need DB access can be tested without a real database. Exported from `src/policy/index.ts` alongside `OutlineForImpact` / `OutlineEntryForImpact`.
+- **`DispatchOptions.queryEngine?`** — `dispatchPolicy` forwards the engine into `ctx` so DB-aware rules can reach it.
+- `nexus-policy-check` bin opens a readonly `QueryEngine` at startup; MCP `executePolicyCheck` forwards the already-existing server-side engine.
+- `hooks/nexus-first.sh` now handles `Edit` and `Write` events — install instructions updated to `"matcher": "Grep|Glob|Agent|Read|Edit|Write"`.
+
+### Notes
+- Never hard-denies. Worst case is silent allow.
+- Rule triggers: Edit must map to a top-level exported symbol via `findSymbolAtEdit`; Write must target an existing file with ≥1 importer and ≥1 top-level export. New-file Writes and non-exported edits skip silently.
+- `additional_context` capped at 600 chars; overflow truncated with `…`.
+- Engine construction adds ~70-100 ms cold-start on the bin hot path (eager tree-sitter grammar load via `QueryEngine` → `parser.ts`). Deferred to a follow-up (split `QueryEngine` DB-only surface, or lazy grammar loading).
+
+---
+
 ## [Unreleased] — A5/C2 read-redirect (warning-first)
 
 ### Added
