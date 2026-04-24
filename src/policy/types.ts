@@ -63,16 +63,17 @@ export interface QueryEngineLike {
     results: OutlineForImpact[];
   };
   /**
-   * Returns one result per distinct caller. The rule uses the envelope `count`
-   * (total distinct callers) for risk bucketing, not the per-caller
-   * `caller_count` field that may live inside each result.
+   * Return envelope for "who calls `name`". The distinct-caller count lives
+   * at `results[0]?.callers?.length ?? 0` — the real `QueryEngine.callers`
+   * wraps a single `CallersResult` in a one-element array, so the envelope
+   * `count` is always 0 or 1 (NOT the distinct-caller count). Rules must
+   * compute the count from `results[0].callers.length`.
    */
   callers(
     name: string,
     opts?: { file?: string; limit?: number },
   ): {
-    results: unknown[];
-    count: number;
+    results: { callers: unknown[] }[];
   };
 }
 

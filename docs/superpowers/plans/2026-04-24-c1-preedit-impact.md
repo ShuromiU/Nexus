@@ -91,7 +91,7 @@ Then add this test at the end of the existing `describe` block:
     const stubEngine: QueryEngineLike = {
       importers: () => ({ results: [], count: 0 }),
       outline: () => ({ results: [] }),
-      callers: () => ({ results: [], count: 0 }),
+      callers: () => ({ results: [{ callers: [] }] }),
     };
     const ctx: PolicyContext = {
       rootDir: '/tmp',
@@ -120,11 +120,11 @@ Then add this test at the end of the existing `describe` block:
     const engine: QueryEngineLike = {
       importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
       outline: () => ({ results: [{ file: 'src/b.ts', exports: [], outline: [] }] }),
-      callers: (_name, _opts) => ({ results: [], count: 0 }),
+      callers: (_name, _opts) => ({ results: [{ callers: [] }] }),
     };
     expect(engine.importers('src/b.ts').count).toBe(1);
     expect(engine.outline('src/b.ts').results.length).toBe(1);
-    expect(engine.callers('foo', { file: 'src/b.ts', limit: 50 }).count).toBe(0);
+    expect(engine.callers('foo', { file: 'src/b.ts', limit: 50 }).results[0].callers.length).toBe(0);
   });
 ```
 
@@ -203,16 +203,17 @@ export interface QueryEngineLike {
     results: OutlineForImpact[];
   };
   /**
-   * Returns one result per distinct caller. The rule uses the envelope `count`
-   * (total distinct callers) for risk bucketing, not the per-caller
-   * `caller_count` field that may live inside each result.
+   * Return envelope for "who calls `name`". The distinct-caller count lives
+   * at `results[0]?.callers?.length ?? 0` — the real `QueryEngine.callers`
+   * wraps a single `CallersResult` in a one-element array, so the envelope
+   * `count` is always 0 or 1 (NOT the distinct-caller count). Rules must
+   * compute the count from `results[0].callers.length`.
    */
   callers(
     name: string,
     opts?: { file?: string; limit?: number },
   ): {
-    results: unknown[];
-    count: number;
+    results: { callers: unknown[] }[];
   };
 }
 
@@ -715,7 +716,7 @@ function makeEngine(overrides: Partial<QueryEngineLike> = {}): QueryEngineLike {
   return {
     importers: () => ({ results: [], count: 0 }),
     outline: () => ({ results: [] }),
-    callers: () => ({ results: [], count: 0 }),
+    callers: () => ({ results: [{ callers: [] }] }),
     ...overrides,
   };
 }
@@ -740,7 +741,7 @@ describe('preeditImpactRule — Edit path', () => {
     const engine = makeEngine({
       importers: () => ({ results: [{ file: 'src/a.ts' }, { file: 'src/b.ts' }], count: 2 }),
       outline: () => ({ results: [outline] }),
-      callers: () => ({ results: [], count: 6 }),
+      callers: () => ({ results: [{ callers: new Array(6) }] }),
     });
     const ctx: PolicyContext = {
       rootDir: tmpDir,
@@ -1024,7 +1025,8 @@ function evaluateEdit(
 
   let callerCount = 0;
   try {
-    callerCount = engine.callers(match.name, { file: relPath, limit: 50 }).count;
+    const env = engine.callers(match.name, { file: relPath, limit: 50 });
+    callerCount = env.results[0]?.callers?.length ?? 0;
   } catch {
     callerCount = 0;
   }
@@ -1154,7 +1156,7 @@ describe('preeditImpactRule — Write path', () => {
     const engine = makeEngine({
       importers: () => ({ results: [{ file: 'src/a.ts' }, { file: 'src/b.ts' }], count: 2 }),
       outline: () => ({ results: [outline] }),
-      callers: (name) => ({ results: [], count: callerCounts[name] ?? 0 }),
+      callers: (name) => ({ results: [{ callers: new Array(callerCounts[name] ?? 0) }] }),
     });
     const ctx: PolicyContext = {
       rootDir: tmpDir,
@@ -1214,7 +1216,7 @@ describe('preeditImpactRule — Write path', () => {
       outline: () => ({ results: [outline] }),
       callers: (name) => {
         if (name === 'foo') throw new Error('boom');
-        return { results: [], count: 4 };
+        return { results: [{ callers: new Array(4) }] };
       },
     });
     const ctx: PolicyContext = {
@@ -1308,7 +1310,8 @@ function evaluateWrite(ctx: PolicyContext, relPath: string, absPath: string) {
   const affectedSymbols = exportedTopLevel.map(entry => {
     let callerCount = 0;
     try {
-      callerCount = engine.callers(entry.name, { file: relPath, limit: 50 }).count;
+      const env = engine.callers(entry.name, { file: relPath, limit: 50 });
+      callerCount = env.results[0]?.callers?.length ?? 0;
     } catch {
       callerCount = 0;
     }
@@ -1381,7 +1384,7 @@ Append to `tests/policy-dispatcher.test.ts`, inside the outer `describe('dispatc
     const stubEngine = {
       importers: () => ({ results: [], count: 0 }),
       outline: () => ({ results: [] }),
-      callers: () => ({ results: [], count: 0 }),
+      callers: () => ({ results: [{ callers: [] }] }),
     };
     const resp = dispatchPolicy(ev(), {
       rootDir: tmpDir,
@@ -1529,7 +1532,7 @@ Append to `tests/policy-dispatcher.test.ts`, inside the `describe('dispatchPolic
           },
         ],
       }),
-      callers: () => ({ results: [], count: 4 }),
+      callers: () => ({ results: [{ callers: new Array(4) }] }),
     };
     const resp = dispatchPolicy(
       ev('Edit', { file_path: abs, old_string: 'return 1;' }),

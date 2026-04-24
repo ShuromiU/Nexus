@@ -62,7 +62,7 @@ describe('policy types', () => {
     const stubEngine: QueryEngineLike = {
       importers: () => ({ results: [], count: 0 }),
       outline: () => ({ results: [] }),
-      callers: () => ({ results: [], count: 0 }),
+      callers: () => ({ results: [{ callers: [] }] }),
     };
     const ctx: PolicyContext = {
       rootDir: '/tmp',
@@ -91,10 +91,10 @@ describe('policy types', () => {
     const engine: QueryEngineLike = {
       importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
       outline: () => ({ results: [{ file: 'src/b.ts', exports: [], outline: [] }] }),
-      callers: (_name, _opts) => ({ results: [], count: 0 }),
+      callers: (_name, _opts) => ({ results: [{ callers: [] }] }),
     };
     expect(engine.importers('src/b.ts').count).toBe(1);
     expect(engine.outline('src/b.ts').results.length).toBe(1);
-    expect(engine.callers('foo', { file: 'src/b.ts', limit: 50 }).count).toBe(0);
+    expect(engine.callers('foo', { file: 'src/b.ts', limit: 50 }).results[0].callers.length).toBe(0);
   });
 });
