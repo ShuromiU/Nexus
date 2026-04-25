@@ -3,6 +3,7 @@
 import { Command } from 'commander';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import Database from 'better-sqlite3';
 import { runIndex } from '../index/orchestrator.js';
 import { openDatabase, applySchema } from '../db/schema.js';
 import { QueryEngine } from '../query/engine.js';
@@ -21,6 +22,164 @@ import '../analysis/languages/go.js';
 import '../analysis/languages/rust.js';
 import '../analysis/languages/java.js';
 import '../analysis/languages/csharp.js';
+
+// ── Telemetry helpers (D5) ────────────────────────────────────────────
+
+interface TelemetryStats {
+  since: string;
+  rules: Record<string, {
+    events: number;
+    decisions: Record<string, number>;
+    asks?: number;
+    overrides?: number;
+    p50_us: number | null;
+    p95_us: number | null;
+    p99_us: number | null;
+  }>;
+  opt_outs: { transitions: number };
+}
+
+function parseSince(spec: string | undefined): number {
+  if (!spec) return 30 * 86400000;
+  const m = /^(\d+)([dh])$/.exec(spec);
+  if (!m) return 30 * 86400000;
+  const n = Number(m[1]);
+  return m[2] === 'h' ? n * 3600 * 1000 : n * 86400 * 1000;
+}
+
+function percentile(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+  return sorted[idx];
+}
+
+function computeTelemetryStats(rootDir: string, sinceSpec: string | undefined): TelemetryStats | null {
+  const dbPath = path.join(rootDir, '.nexus', 'telemetry.db');
+  if (!fs.existsSync(dbPath)) return null;
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const since = Date.now() - parseSince(sinceSpec);
+
+    const decisions = db.prepare(`
+      SELECT rule, decision, COUNT(*) AS n
+      FROM events
+      WHERE hook_event='PreToolUse' AND ts_ms > ? AND rule IS NOT NULL
+      GROUP BY rule, decision
+    `).all(since) as { rule: string; decision: string; n: number }[];
+
+    const overrides = db.prepare(`
+      SELECT pre.rule AS rule,
+             COUNT(*) AS asks,
+             SUM(CASE WHEN post.id IS NOT NULL THEN 1 ELSE 0 END) AS overridden
+      FROM events pre
+      LEFT JOIN events post
+        ON post.session_id = pre.session_id
+       AND post.input_hash = pre.input_hash
+       AND post.hook_event = 'PostToolUse'
+       AND post.ts_ms BETWEEN pre.ts_ms AND pre.ts_ms + 300000
+      WHERE pre.hook_event='PreToolUse' AND pre.decision='ask' AND pre.ts_ms > ?
+      GROUP BY pre.rule
+    `).all(since) as { rule: string; asks: number; overridden: number }[];
+
+    const ruleNames = new Set<string>();
+    decisions.forEach(d => ruleNames.add(d.rule));
+    overrides.forEach(o => ruleNames.add(o.rule));
+
+    const rules: TelemetryStats['rules'] = {};
+    for (const rule of ruleNames) {
+      const decs: Record<string, number> = {};
+      let total = 0;
+      for (const d of decisions.filter(x => x.rule === rule)) {
+        decs[d.decision] = d.n;
+        total += d.n;
+      }
+      const lats = (db.prepare(`
+        SELECT latency_us FROM events
+        WHERE rule=? AND latency_us IS NOT NULL AND ts_ms > ?
+        ORDER BY latency_us
+      `).all(rule, since) as { latency_us: number }[]).map(r => r.latency_us);
+      const ov = overrides.find(o => o.rule === rule);
+      rules[rule] = {
+        events: total,
+        decisions: decs,
+        ...(ov ? { asks: ov.asks, overrides: ov.overridden } : {}),
+        p50_us: percentile(lats, 50),
+        p95_us: percentile(lats, 95),
+        p99_us: percentile(lats, 99),
+      };
+    }
+
+    const optOutRow = db.prepare(`
+      SELECT COUNT(*) AS n FROM events
+      WHERE hook_event IN ('opt_out','opt_in') AND ts_ms > ?
+    `).get(since) as { n: number };
+
+    return {
+      since: sinceSpec ?? '30d',
+      rules,
+      opt_outs: { transitions: optOutRow.n },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function formatTelemetryStats(s: TelemetryStats): string {
+  const lines: string[] = [];
+  lines.push(`telemetry stats — since ${s.since}`);
+  lines.push('');
+  if (Object.keys(s.rules).length === 0) {
+    lines.push('  (no events)');
+  } else {
+    for (const [rule, info] of Object.entries(s.rules)) {
+      lines.push(`  ${rule}`);
+      const decs = Object.entries(info.decisions).map(([d, n]) => `${d}=${n}`).join(' ');
+      lines.push(`    events: ${info.events}  ${decs}`);
+      if (info.asks !== undefined && info.asks > 0) {
+        const rate = ((info.overrides ?? 0) / info.asks * 100).toFixed(1);
+        lines.push(`    overrides: ${info.overrides}/${info.asks} (${rate}%)`);
+      }
+      const fmt = (v: number | null): string => v === null ? '-' : `${v}us`;
+      lines.push(`    latency: p50=${fmt(info.p50_us)} p95=${fmt(info.p95_us)} p99=${fmt(info.p99_us)}`);
+    }
+  }
+  lines.push('');
+  lines.push(`  opt_out transitions: ${s.opt_outs.transitions}`);
+  return lines.join('\n');
+}
+
+const TELEMETRY_EXPORT_COLUMNS = [
+  'id', 'ts_ms', 'session_id', 'hook_event', 'tool_name', 'rule', 'decision',
+  'latency_us', 'input_hash', 'file_path', 'payload_json',
+];
+
+function csvEscape(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+function exportTelemetry(rootDir: string, sinceSpec: string | undefined, format: 'ndjson' | 'csv'): void {
+  const dbPath = path.join(rootDir, '.nexus', 'telemetry.db');
+  if (!fs.existsSync(dbPath)) return;
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const since = Date.now() - parseSince(sinceSpec);
+    const rows = db.prepare(`SELECT * FROM events WHERE ts_ms > ? ORDER BY id`).all(since) as Record<string, unknown>[];
+    if (rows.length === 0) return;
+    if (format === 'ndjson') {
+      for (const r of rows) console.log(JSON.stringify(r));
+    } else {
+      console.log(TELEMETRY_EXPORT_COLUMNS.join(','));
+      for (const r of rows) {
+        console.log(TELEMETRY_EXPORT_COLUMNS.map(c => csvEscape(r[c])).join(','));
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
 
 // ── Output Formatting ─────────────────────────────────────────────────
 
@@ -873,6 +1032,71 @@ export function createProgram(): Command {
         printJson(result, !!opts.pretty);
       } finally {
         db.close();
+      }
+    });
+
+  // ── telemetry ──────────────────────────────────────────────────────
+
+  const telemetry = program.command('telemetry').description('Policy telemetry (D5)');
+
+  telemetry
+    .command('stats')
+    .description('Print telemetry digest')
+    .option('--since <spec>', 'Time window: 30d, 7d, 1h', '30d')
+    .option('--json', 'Emit JSON')
+    .action((opts: { since?: string; json?: boolean }) => {
+      const root = detectRoot(process.cwd());
+      const stats = computeTelemetryStats(root, opts.since);
+      if (!stats || Object.keys(stats.rules).length === 0) {
+        if (opts.json) {
+          console.log(JSON.stringify({
+            since: opts.since ?? '30d',
+            rules: {},
+            opt_outs: { transitions: stats?.opt_outs.transitions ?? 0 },
+          }));
+        } else {
+          console.log('telemetry stats: no events recorded');
+        }
+        return;
+      }
+      if (opts.json) console.log(JSON.stringify(stats));
+      else console.log(formatTelemetryStats(stats));
+    });
+
+  telemetry
+    .command('export')
+    .description('Dump events as NDJSON or CSV')
+    .option('--since <spec>', 'Time window: 30d, 7d, 1h', '30d')
+    .option('--format <fmt>', 'ndjson | csv', 'ndjson')
+    .action((opts: { since?: string; format?: string }) => {
+      const root = detectRoot(process.cwd());
+      const fmt: 'ndjson' | 'csv' = opts.format === 'csv' ? 'csv' : 'ndjson';
+      exportTelemetry(root, opts.since, fmt);
+    });
+
+  telemetry
+    .command('purge')
+    .description('Delete .nexus/telemetry.db')
+    .option('--yes', 'Confirm deletion (required)')
+    .action((opts: { yes?: boolean }) => {
+      const root = detectRoot(process.cwd());
+      const dbPath = path.join(root, '.nexus', 'telemetry.db');
+      if (!opts.yes) {
+        console.log('telemetry purge: re-run with --yes to confirm.');
+        return;
+      }
+      try {
+        if (fs.existsSync(dbPath)) {
+          fs.unlinkSync(dbPath);
+          for (const ext of ['-wal', '-shm']) {
+            const sib = dbPath + ext;
+            if (fs.existsSync(sib)) {
+              try { fs.unlinkSync(sib); } catch { /* ignore */ }
+            }
+          }
+        }
+      } catch {
+        /* ignore */
       }
     });
 

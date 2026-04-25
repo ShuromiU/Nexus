@@ -19,6 +19,13 @@ import { DEFAULT_RULES } from '../policy/index.js';
 import type { PolicyEvent, PolicyResponse, QueryEngineLike } from '../policy/types.js';
 import { openDatabase } from '../db/schema.js';
 import { QueryEngine } from '../query/engine.js';
+import {
+  openTelemetryDb,
+  closeTelemetryDb,
+  pruneIfDue,
+  recordOptOutTransition,
+} from '../policy/telemetry.js';
+import { isTelemetryEnabled, computeInputHash } from '../policy/telemetry-config.js';
 
 function readStdinSync(): string {
   try {
@@ -96,14 +103,29 @@ function main(): void {
     rootDir = cwd;
   }
 
+  // Telemetry boundary: detect transition first, then conditionally open + prune.
+  const enabled = isTelemetryEnabled(rootDir);
+  recordOptOutTransition(rootDir, enabled);
+  const telemetryDb = enabled ? openTelemetryDb(rootDir) : null;
+  if (telemetryDb) {
+    try { pruneIfDue(telemetryDb); } catch { /* swallow */ }
+  }
+  const inputHash = computeInputHash(event.tool_input);
+
   const queryEngine = tryOpenEngine(rootDir);
 
-  const response = dispatchPolicy(event, {
-    rootDir,
-    rules: DEFAULT_RULES,
-    ...(queryEngine ? { queryEngine } : {}),
-  });
-  process.stdout.write(JSON.stringify(response));
+  try {
+    const response = dispatchPolicy(event, {
+      rootDir,
+      rules: DEFAULT_RULES,
+      ...(queryEngine ? { queryEngine } : {}),
+      ...(telemetryDb ? { telemetryDb } : {}),
+      inputHash,
+    });
+    process.stdout.write(JSON.stringify(response));
+  } finally {
+    if (telemetryDb) closeTelemetryDb(telemetryDb);
+  }
 }
 
 const isDirectRun = process.argv[1]?.replace(/\\/g, '/').endsWith('transports/policy-entry.js')

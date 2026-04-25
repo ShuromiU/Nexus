@@ -1,3 +1,26 @@
+## [Unreleased] — D5 v1 telemetry
+
+### Added
+- **`.nexus/telemetry.db`** — append-only SQLite store separate from `index.db`. Records every policy event with `rule`, `decision`, `latency_us`, `session_id`, and a canonical `tool_input` hash. Schema versioned at `1`; corrupt files are quarantined and recreated.
+- **Override correlation.** PreToolUse `ask` rows joined to PostToolUse rows on `(session_id, input_hash)` within a 5-minute window — feeds the V4 metrics-gate "override rate" signal.
+- **Dispatcher instrumentation.** Per-rule timing in microseconds; `try/catch` wraps each `rule.evaluate` so a thrown rule cannot break dispatch. A single `noop` row is recorded when no rule fires (so override joins detect pass-through actions).
+- **Opt-out.** `NEXUS_TELEMETRY=0|false` env var (highest priority) or `.nexus.json {"telemetry": false}`. Default: enabled. Transitions are themselves recorded as `opt_out` / `opt_in` rows, fulfilling V3's "explicit turn-it-off signal" requirement.
+- **Retention.** 30 days OR 100,000 rows, whichever hits first. Pruned at policy-entry startup, gated to once per 24h via `meta.last_prune_ts`.
+- **CLI surface.** `nexus telemetry stats|export|purge`:
+  - `stats [--since=30d|7d|1h] [--json]` — decision counts, latency p50/p95/p99 per rule, override rate, opt-out transitions.
+  - `export [--since] [--format=ndjson|csv]` — raw rows for offline analysis.
+  - `purge --yes` — drops the DB; cleans up WAL/SHM siblings.
+- `PolicyContext.telemetryDb?` and `PolicyContext.inputHash?` added; `DispatchOptions` widened to match.
+- `NexusConfig.telemetry?: boolean` field.
+
+### Notes
+- No MCP tool in v1 (CLI sufficient for the V3→V4 gate review).
+- No remote upload, ever. Everything stays in `.nexus/telemetry.db`.
+- Hot-path overhead: one prepared INSERT per fired rule (~10-20µs); below the 150ms p95 latency target.
+- Closes the V3 metrics-gate prerequisite.
+
+---
+
 ## [Unreleased] — D3 v1 evidence summary (warning-first)
 
 ### Added
