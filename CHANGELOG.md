@@ -1,3 +1,22 @@
+## [Unreleased] — D3 v1 evidence summary (warning-first)
+
+### Added
+- **`evidence-summary` policy rule** — PreToolUse `Bash` events whose command matches `git commit`, `git push`, or `gh pr create` get an informational `additional_context` summary. Payload includes `tests_run_this_session`, `affected_callers` (top-level exports of the change set with caller counts + ≤3 sample sites each), `new_unused_exports`, `caller_risk` (`low|medium|high` from C1's `bucketRisk`), and `evidence_ok` (heuristic: tests_run AND risk ≠ high AND no new unused). Never blocks. Falls open when the DB is unavailable, no changed file is indexed, no exported top-level symbol is in the change set, or git is missing.
+- **`test-tracker` policy rule** — PostToolUse `Bash` events whose command matches a configured allow-list (`npm test`, `pnpm test`, `yarn test`, `vitest`, `jest`, `pytest`, `go test`, `cargo test`, `nexus test`, …) and whose `tool_response.exit_code` is `0` are recorded to `.nexus/session-state.json`, keyed on `session_id`. Cross-session entries are isolated (file rewritten fresh on session change). FIFO-capped at 256 entries.
+- **`hooks/nexus-post.sh`** — PostToolUse dispatcher for `Bash`. Pipes the event to `nexus-policy-check` and discards stdout. Install matcher: `"Bash"`.
+- `hooks/nexus-first.sh` now handles `Bash` PreToolUse — install matcher updated to `"Grep|Glob|Agent|Read|Edit|Write|Bash"`.
+- `PolicyEvent.tool_response?: Record<string, unknown>` — present on PostToolUse only; consumed by `test-tracker`.
+- `QueryEngineLike` widens to add `unusedExports` plus a richer `callers` callsite shape so D3 can read sample-site `caller.file` / `call_sites[].line`.
+- `nexus_policy_check` MCP schema declares `tool_response` and `session_id` on the event payload (the dispatch handler already passed them through).
+
+### Notes
+- Never hard-denies. Worst case is silent allow.
+- `additional_context` capped at 1200 chars; `affected_callers` and `new_unused_exports` each capped at 10 entries with `…+N more` suffixes.
+- Test-command allow-list is hard-coded in V3 — `.nexus.json` `testCommands` overrides land with the V4 long-lived policy worker (resolving config per event would dominate the latency budget).
+- Closes V3 Tier 1.
+
+---
+
 ## [Unreleased] — C1 preedit-impact (warning-first)
 
 ### Added
