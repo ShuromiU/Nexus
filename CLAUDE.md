@@ -116,3 +116,5 @@ Shipped rules:
 - `test-tracker` — on `Bash` PostToolUse events matching a test allow-list with `exit_code: 0`, records the run to `.nexus/session-state.json` keyed on `session_id`. Read by `evidence-summary`.
 
 The PostToolUse hook is installed separately as `hooks/nexus-post.sh` with matcher `"Bash"`; the PreToolUse install matcher widens to `"Grep|Glob|Agent|Read|Edit|Write|Bash"`.
+
+**Telemetry (D5):** every policy event is recorded to `.nexus/telemetry.db` (decision, rule, latency_us, session_id, canonical input_hash). Disabled via `NEXUS_TELEMETRY=0|false` (env, highest priority) or `.nexus.json {"telemetry": false}`; opt-in/opt-out transitions are themselves logged. Retention: 30 days OR 100k rows, pruned at startup (24h gate). CLI: `nexus telemetry stats|export|purge`. No MCP tool in v1; no network I/O ever.
