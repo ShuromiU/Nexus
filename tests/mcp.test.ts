@@ -465,6 +465,48 @@ describe('nexus_policy_check tool', () => {
     expect(typeof payload.results[0].stale_hint).toBe('boolean');
     expect(['current', 'stale']).toContain(payload.index_status);
   });
+
+  it('schema declares tool_response and session_id on the event payload', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_policy_check');
+    const schema = tool!.inputSchema as {
+      properties?: Record<string, { properties?: Record<string, unknown> }>;
+    };
+    const eventProps = schema.properties?.event?.properties ?? {};
+    expect(eventProps).toHaveProperty('tool_response');
+    expect(eventProps).toHaveProperty('session_id');
+  });
+
+  it('returns allow for a PreToolUse Bash git commit event (smoke test)', async () => {
+    const result = await callTool('nexus_policy_check', {
+      event: {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git commit -m wip' },
+        session_id: 's-mcp-1',
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    // git/.nexus state may or may not produce a summary in this test
+    // environment — both shapes are accepted. The key assertion is that
+    // dispatching a Bash event does not throw.
+    expect(payload.results[0].decision).toBe('allow');
+    expect(typeof payload.results[0].stale_hint).toBe('boolean');
+  });
+
+  it('returns allow for a PostToolUse Bash npm test event (smoke test)', async () => {
+    const result = await callTool('nexus_policy_check', {
+      event: {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test' },
+        tool_response: { exit_code: 0 },
+        session_id: 's-mcp-2',
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.results[0].decision).toBe('allow');
+  });
 });
 
 describe('nexus_lockfile_deps tool', () => {

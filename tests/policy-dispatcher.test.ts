@@ -243,4 +243,84 @@ describe('dispatchPolicy with DEFAULT_RULES', () => {
     expect(resp.decision).toBe('allow');
     expect(resp.rule).toBeUndefined();
   });
+
+  it('DEFAULT_RULES includes evidence-summary and test-tracker', () => {
+    const names = DEFAULT_RULES.map(r => r.name);
+    expect(names).toContain('evidence-summary');
+    expect(names).toContain('test-tracker');
+  });
+
+  it('PostToolUse Bash npm test event lands at test-tracker and writes session-state', () => {
+    const resp = dispatchPolicy(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test' },
+        tool_response: { exit_code: 0 },
+        session_id: 's1',
+      },
+      { rootDir: tmpDir, rules: DEFAULT_RULES },
+    );
+    expect(resp.decision).toBe('allow');
+    expect(resp.stale_hint).toBeDefined();
+    const stateFile = path.join(tmpDir, '.nexus', 'session-state.json');
+    expect(fs.existsSync(stateFile)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    expect(parsed.session_id).toBe('s1');
+    expect(parsed.tests_run.map((r: { cmd: string }) => r.cmd)).toContain('npm test');
+  });
+
+  it('PreToolUse Bash git-commit with stub rule emits additional_context', async () => {
+    fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'src', 'foo.ts'), 'export function foo() {}\n');
+
+    const stubEngine = {
+      importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      outline: () => ({
+        results: [{
+          file: 'src/foo.ts',
+          exports: ['foo'],
+          outline: [{ name: 'foo', kind: 'function', line: 1, end_line: 1 }],
+        }],
+      }),
+      callers: () => ({
+        results: [{
+          callers: Array.from({ length: 4 }, (_, i) => ({
+            caller: { file: `src/c${i}.ts`, line: i },
+            call_sites: [{ line: i, col: 0 }],
+          })),
+        }],
+      }),
+      unusedExports: () => ({ results: [] }),
+    };
+
+    // Build a stand-in evidence rule with an injected runGit. Splice it in
+    // before the default DEFAULT_RULES (which uses the real exec'd git) by
+    // omitting the default evidenceSummaryRule from the list.
+    const { buildEvidenceRule } = await import('../src/policy/rules/evidence-summary.js');
+    const stubEvidence = buildEvidenceRule({
+      runGit: (args) => {
+        const k = args.join(' ');
+        if (k === 'status --porcelain=v1') return ' M src/foo.ts\n';
+        return '';
+      },
+    });
+
+    const rules = DEFAULT_RULES.filter(r => r.name !== 'evidence-summary').concat(stubEvidence);
+
+    const resp = dispatchPolicy(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git commit -m wip' },
+        session_id: 's1',
+      },
+      { rootDir: tmpDir, rules, queryEngine: stubEngine },
+    );
+
+    expect(resp.decision).toBe('allow');
+    expect(resp.rule).toBe('evidence-summary');
+    expect(resp.additional_context).toBeDefined();
+    expect(resp.additional_context).toContain('foo');
+  });
 });

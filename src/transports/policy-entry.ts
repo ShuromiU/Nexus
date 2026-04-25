@@ -46,10 +46,14 @@ function parseEvent(raw: string): PolicyEvent | null {
   try {
     const obj = JSON.parse(raw) as Partial<PolicyEvent>;
     if (typeof obj.tool_name !== 'string') return null;
+    const hasToolResponse = obj.tool_response && typeof obj.tool_response === 'object';
     return {
       hook_event_name: typeof obj.hook_event_name === 'string' ? obj.hook_event_name : 'PreToolUse',
       tool_name: obj.tool_name,
       tool_input: (obj.tool_input ?? {}) as Record<string, unknown>,
+      ...(hasToolResponse
+        ? { tool_response: obj.tool_response as Record<string, unknown> }
+        : {}),
       session_id: typeof obj.session_id === 'string' ? obj.session_id : undefined,
       cwd: typeof obj.cwd === 'string' ? obj.cwd : undefined,
     };

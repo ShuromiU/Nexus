@@ -6,6 +6,12 @@ export interface PolicyEvent {
   hook_event_name: string;
   tool_name: string;
   tool_input: Record<string, unknown>;
+  /**
+   * Present on PostToolUse only. Shape varies by tool. For `Bash`,
+   * Claude Code populates `{ stdout, stderr, exit_code, ... }`.
+   * Untyped because no PreToolUse rule consumes it.
+   */
+  tool_response?: Record<string, unknown>;
   session_id?: string;
   cwd?: string;
 }
@@ -73,7 +79,25 @@ export interface QueryEngineLike {
     name: string,
     opts?: { file?: string; limit?: number },
   ): {
-    results: { callers: unknown[] }[];
+    results: {
+      callers: {
+        caller?: { file?: string; line?: number };
+        call_sites?: { line: number; col?: number }[];
+      }[];
+    }[];
+  };
+  /**
+   * D3 evidence-summary uses this to surface exports added in the change set
+   * that have no importers and no external occurrences. Real
+   * `QueryEngine.unusedExports` returns `UnusedExportResult` rows
+   * (`{ file, name, kind, line }`) which structurally satisfies this shape.
+   */
+  unusedExports(opts?: {
+    path?: string;
+    limit?: number;
+    mode?: 'default' | 'runtime_only';
+  }): {
+    results: { name: string; file: string; kind: string; line: number }[];
   };
 }
 

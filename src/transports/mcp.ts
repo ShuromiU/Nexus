@@ -544,6 +544,10 @@ export function createMcpServer(): Server {
                   hook_event_name: { type: 'string' },
                   tool_name: { type: 'string' },
                   tool_input: { type: 'object' },
+                  tool_response: {
+                    type: 'object',
+                    description: 'Present on PostToolUse only',
+                  },
                   session_id: { type: 'string' },
                   cwd: { type: 'string' },
                 },

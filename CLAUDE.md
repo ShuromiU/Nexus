@@ -112,3 +112,7 @@ Shipped rules:
 - `read-on-structured` — asks before `Read` on structured configs and lockfiles; suggests `nexus_structured_query`/`nexus_structured_outline` or `nexus_lockfile_deps`.
 - `read-on-source` — allows bare `Read` on indexed source files but adds `additionalContext` nudging `nexus_outline`/`nexus_source`.
 - `preedit-impact` — on `Edit`/`Write` events against an exported top-level symbol of an indexed source file with ≥1 known importer, emits `allow + additionalContext` summarizing importer count, caller count, and bucketed risk (`low`/`medium`/`high`). Never blocks. Falls open when the DB is unavailable.
+- `evidence-summary` — on `Bash` PreToolUse events whose command matches `git commit|push|gh pr create`, emits `allow + additionalContext` summarizing affected callers, new unused exports, `tests_run_this_session`, and risk. Never blocks. Falls open when no changed file is indexed.
+- `test-tracker` — on `Bash` PostToolUse events matching a test allow-list with `exit_code: 0`, records the run to `.nexus/session-state.json` keyed on `session_id`. Read by `evidence-summary`.
+
+The PostToolUse hook is installed separately as `hooks/nexus-post.sh` with matcher `"Bash"`; the PreToolUse install matcher widens to `"Grep|Glob|Agent|Read|Edit|Write|Bash"`.
