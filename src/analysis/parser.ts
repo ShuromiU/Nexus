@@ -1,35 +1,71 @@
-import Parser from 'tree-sitter';
-import treeSitterTS from 'tree-sitter-typescript';
-import treeSitterPython from 'tree-sitter-python';
-import treeSitterGo from 'tree-sitter-go';
-import treeSitterRust from 'tree-sitter-rust';
-import treeSitterJava from 'tree-sitter-java';
-import treeSitterCSharp from 'tree-sitter-c-sharp';
-import treeSitterCSS from 'tree-sitter-css';
-
-const { typescript: tsLanguage, tsx: tsxLanguage } = treeSitterTS as {
-  typescript: unknown;
-  tsx: unknown;
-};
+import { createRequire } from 'node:module';
+import type Parser from 'tree-sitter';
 
 /**
- * Grammar table: maps language names to tree-sitter Language objects.
- * setLanguage() accepts `any`, so we store as unknown and cast at use site.
+ * Tree-sitter native bindings are loaded lazily so that consumers who
+ * never parse source code (notably `nexus-policy-check`, which uses the
+ * QueryEngine for SQL-only queries) don't pay the ~70-100 ms cold-start
+ * cost of importing all grammar bindings.
+ *
+ * Both the host `tree-sitter` package and each grammar are CJS native
+ * modules; we pull them in synchronously via `createRequire` only when a
+ * caller actually asks for a parser.
  */
-const GRAMMARS: Record<string, unknown> = {
-  typescript: tsLanguage,
-  tsx: tsxLanguage,
-  javascript: tsLanguage, // JS is a subset of TS grammar
-  jsx: tsxLanguage,       // JSX is a subset of TSX grammar
-  python: treeSitterPython,
-  go: treeSitterGo,
-  rust: treeSitterRust,
-  java: treeSitterJava,
-  csharp: treeSitterCSharp,
-  css: treeSitterCSS,
+
+// Side-effect-free static knowledge: which logical names exist and which
+// CJS package each one comes from. Loading these strings has no runtime cost.
+const GRAMMAR_PACKAGES: Record<string, string> = {
+  // typescript-family — the package exports both `typescript` and `tsx` keys.
+  typescript: 'tree-sitter-typescript',
+  tsx: 'tree-sitter-typescript',
+  javascript: 'tree-sitter-typescript',
+  jsx: 'tree-sitter-typescript',
+  python: 'tree-sitter-python',
+  go: 'tree-sitter-go',
+  rust: 'tree-sitter-rust',
+  java: 'tree-sitter-java',
+  csharp: 'tree-sitter-c-sharp',
+  css: 'tree-sitter-css',
 };
 
-/** Cached parser instances per grammar (avoid re-creating) */
+const requireCJS = createRequire(import.meta.url);
+
+let cachedParserCtor: typeof Parser | null = null;
+function loadParserCtor(): typeof Parser {
+  if (cachedParserCtor) return cachedParserCtor;
+  // tree-sitter exports the host binding as a default export under CJS.
+  const mod = requireCJS('tree-sitter') as typeof Parser | { default: typeof Parser };
+  cachedParserCtor = (mod as { default?: typeof Parser }).default ?? (mod as typeof Parser);
+  return cachedParserCtor;
+}
+
+const grammarCache = new Map<string, unknown>();
+function loadGrammar(grammarKey: string): unknown | null {
+  if (grammarCache.has(grammarKey)) return grammarCache.get(grammarKey) ?? null;
+  const pkg = GRAMMAR_PACKAGES[grammarKey];
+  if (!pkg) return null;
+  let mod: unknown;
+  try {
+    mod = requireCJS(pkg);
+  } catch {
+    return null;
+  }
+  // tree-sitter-typescript exports { typescript, tsx } as named keys; the rest
+  // are the language object directly.
+  let grammar: unknown;
+  if (grammarKey === 'typescript' || grammarKey === 'javascript') {
+    grammar = (mod as { typescript: unknown }).typescript;
+  } else if (grammarKey === 'tsx' || grammarKey === 'jsx') {
+    grammar = (mod as { tsx: unknown }).tsx;
+  } else {
+    grammar = mod;
+  }
+  if (!grammar) return null;
+  grammarCache.set(grammarKey, grammar);
+  return grammar;
+}
+
+/** Cached parser instances per grammar (avoid re-creating). */
 const parserCache = new Map<string, Parser>();
 
 /**
@@ -43,9 +79,10 @@ export function getParser(language: string): Parser | null {
 
   let parser = parserCache.get(grammarKey);
   if (!parser) {
-    const grammar = GRAMMARS[grammarKey];
+    const grammar = loadGrammar(grammarKey);
     if (!grammar) return null;
-    parser = new Parser();
+    const ParserCtor = loadParserCtor();
+    parser = new ParserCtor();
     parser.setLanguage(grammar as any); // eslint-disable-line @typescript-eslint/no-explicit-any
     parserCache.set(grammarKey, parser);
   }
@@ -67,7 +104,7 @@ export function parseSource(source: string, language: string): Parser.Tree | nul
  */
 function resolveGrammarKey(language: string): string | null {
   // Direct match
-  if (GRAMMARS[language]) return language;
+  if (language in GRAMMAR_PACKAGES) return language;
 
   // TypeScript uses tsx grammar for .tsx files
   // The scanner assigns "typescript" for .ts/.tsx and "javascript" for .js/.jsx
@@ -94,7 +131,7 @@ export function resolveGrammar(language: string, filePath: string): string | nul
   if (language === 'javascriptreact') return 'jsx';
 
   // Other languages — direct lookup
-  if (GRAMMARS[language]) return language;
+  if (language in GRAMMAR_PACKAGES) return language;
   return null;
 }
 
@@ -102,12 +139,12 @@ export function resolveGrammar(language: string, filePath: string): string | nul
  * Check if a language has a tree-sitter grammar available.
  */
 export function hasGrammar(language: string): boolean {
-  return language in GRAMMARS;
+  return language in GRAMMAR_PACKAGES;
 }
 
 /**
  * Get the list of supported grammar names.
  */
 export function supportedGrammars(): string[] {
-  return Object.keys(GRAMMARS);
+  return Object.keys(GRAMMAR_PACKAGES);
 }
