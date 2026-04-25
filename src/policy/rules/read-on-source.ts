@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import type { PolicyRule } from '../types.js';
 import { classifyPath } from '../../workspace/classify.js';
-import { NON_CODE_PATH } from './common-paths.js';
+import { NON_CODE_PATH, relativize } from './common-paths.js';
 
 const EMPTY_CONFIG = { languages: {} };
 
@@ -39,16 +39,7 @@ export const readOnSourceRule: PolicyRule = {
     const normalized = raw.replace(/\\/g, '/');
     if (NON_CODE_PATH.test(normalized)) return null;
 
-    const rootDirPosix = ctx.rootDir.replace(/\\/g, '/');
-    const absPath = path.posix.isAbsolute(normalized)
-      ? normalized
-      : path.posix.resolve(rootDirPosix || '/', normalized);
-    const candidateRel = rootDirPosix
-      ? path.posix.relative(rootDirPosix, absPath)
-      : normalized;
-    // If the path is outside rootDir (starts with '..'), fall back to the normalized
-    // path — classifyPath will still make a best-effort decision based on basename.
-    const relPath = candidateRel.startsWith('..') ? normalized : candidateRel;
+    const { relPath } = relativize(raw, ctx.rootDir);
     const basename = path.posix.basename(relPath);
     if (basename.length === 0) return null;
 

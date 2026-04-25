@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PolicyRule, PolicyContext, PolicyEvent, QueryEngineLike, OutlineForImpact } from '../types.js';
 import { classifyPath } from '../../workspace/classify.js';
+import { relativize } from './common-paths.js';
 import {
   findSymbolAtEdit,
   bucketRisk,
@@ -182,18 +183,3 @@ function readCapped(absPath: string): string | null {
   }
 }
 
-function relativize(rawPath: string, rootDir: string): { relPath: string; absPath: string } {
-  const normalized = rawPath.replace(/\\/g, '/');
-  const rootDirPosix = rootDir.replace(/\\/g, '/');
-  // POSIX `isAbsolute` doesn't recognize Windows drive-letter prefixes (e.g. "C:/..."),
-  // so detect those explicitly — otherwise `resolve` concatenates the cwd + root + path.
-  const isWinAbs = /^[a-zA-Z]:\//.test(normalized);
-  const absPath = isWinAbs || path.posix.isAbsolute(normalized)
-    ? normalized
-    : path.posix.resolve(rootDirPosix || '/', normalized);
-  const candidateRel = rootDirPosix
-    ? path.posix.relative(rootDirPosix, absPath)
-    : normalized;
-  const relPath = candidateRel.startsWith('..') ? normalized : candidateRel;
-  return { relPath, absPath };
-}

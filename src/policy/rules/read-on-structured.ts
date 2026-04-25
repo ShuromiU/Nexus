@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import type { PolicyRule } from '../types.js';
 import { classifyPath, type FileKind } from '../../workspace/classify.js';
+import { relativize } from './common-paths.js';
 
 const EMPTY_CONFIG = { languages: {} };
 
@@ -27,17 +28,7 @@ export const readOnStructuredRule: PolicyRule = {
     const raw = event.tool_input.file_path;
     if (typeof raw !== 'string' || raw.length === 0) return null;
 
-    const normalized = raw.replace(/\\/g, '/');
-    const rootDirPosix = ctx.rootDir.replace(/\\/g, '/');
-    const absPath = path.posix.isAbsolute(normalized)
-      ? normalized
-      : path.posix.resolve(rootDirPosix || '/', normalized);
-    const candidateRel = rootDirPosix
-      ? path.posix.relative(rootDirPosix, absPath)
-      : normalized;
-    // If the path is outside rootDir (starts with '..'), fall back to the normalized
-    // path — classifyPath will still make a best-effort decision based on basename.
-    const relPath = candidateRel.startsWith('..') ? normalized : candidateRel;
+    const { relPath } = relativize(raw, ctx.rootDir);
     const basename = path.posix.basename(relPath);
     if (basename.length === 0) return null;
 

@@ -109,15 +109,21 @@ CREATE INDEX IF NOT EXISTS idx_files_status      ON files(status);
 /**
  * Open (or create) the SQLite database with WAL mode and foreign keys.
  * Runs quick_check and applies schema if needed.
+ *
+ * Readonly opens skip the write-related pragmas (journal_mode, foreign_keys,
+ * synchronous) — they're either no-ops on a readonly connection or trigger
+ * journal-file mutations the policy hot path can avoid. Saves a few ms on
+ * `nexus-policy-check` cold start.
  */
 export function openDatabase(
   dbPath: string,
   opts?: { readonly?: boolean },
 ): Database.Database {
-  const db = opts?.readonly
-    ? new Database(dbPath, { readonly: true, fileMustExist: true })
-    : new Database(dbPath);
+  if (opts?.readonly) {
+    return new Database(dbPath, { readonly: true, fileMustExist: true });
+  }
 
+  const db = new Database(dbPath);
   // WAL mode for concurrent reads
   db.pragma('journal_mode = WAL');
   // Enforce foreign key constraints
