@@ -132,3 +132,74 @@ describe('recordEvent', () => {
     closeTelemetryDb(db);
   });
 });
+
+describe('pruneIfDue', () => {
+  it('first call sets last_prune_ts and prunes nothing on empty DB', () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    const r = pruneIfDue(db, 1000);
+    expect(r.pruned).toBe(0);
+    const row = db.prepare('SELECT value FROM meta WHERE key=?').get('last_prune_ts') as { value: string };
+    expect(row.value).toBe('1000');
+    closeTelemetryDb(db);
+  });
+
+  it('within 24h gate returns {pruned:0} without touching events', () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    pruneIfDue(db, 1000);
+    const old = 1000 - 100 * 86400000;
+    recordEvent(db, {
+      ts_ms: old, session_id: null, hook_event: 'PreToolUse',
+      tool_name: 'Read', rule: null, decision: 'noop', latency_us: 0,
+      input_hash: null, file_path: null, payload_json: null,
+    });
+    const r = pruneIfDue(db, 1000 + 1000);
+    expect(r.pruned).toBe(0);
+    const n = (db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+    expect(n).toBe(1);
+    closeTelemetryDb(db);
+  });
+
+  it('removes rows older than 30 days', () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    const now = 1_000_000_000_000;
+    const old = now - 31 * 86400000;
+    const fresh = now - 1 * 86400000;
+    for (const ts of [old, fresh]) {
+      recordEvent(db, {
+        ts_ms: ts, session_id: null, hook_event: 'PreToolUse',
+        tool_name: 'Read', rule: null, decision: 'noop', latency_us: 0,
+        input_hash: null, file_path: null, payload_json: null,
+      });
+    }
+    const r = pruneIfDue(db, now);
+    expect(r.pruned).toBe(1);
+    const remaining = (db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+    expect(remaining).toBe(1);
+    closeTelemetryDb(db);
+  });
+
+  it('caps row count at 100_000 (id-DESC ordered)', { timeout: 30000 }, () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    const now = 1_000_000_000_000;
+    const insert = db.prepare(`INSERT INTO events (ts_ms, hook_event) VALUES (?, ?)`);
+    db.exec('BEGIN');
+    for (let i = 0; i < 100_010; i++) {
+      insert.run(now, 'PreToolUse');
+    }
+    db.exec('COMMIT');
+    const r = pruneIfDue(db, now);
+    expect(r.pruned).toBeGreaterThanOrEqual(10);
+    const n = (db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+    expect(n).toBe(100_000);
+    closeTelemetryDb(db);
+  });
+
+  it('subsequent pruneIfDue beyond 24h gate runs again', () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    pruneIfDue(db, 1000);
+    pruneIfDue(db, 1000 + 25 * 3600 * 1000);
+    const row = db.prepare('SELECT value FROM meta WHERE key=?').get('last_prune_ts') as { value: string };
+    expect(Number(row.value)).toBe(1000 + 25 * 3600 * 1000);
+    closeTelemetryDb(db);
+  });
+});

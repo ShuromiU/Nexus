@@ -118,7 +118,31 @@ export function recordEvent(db: Database.Database | null, ev: TelemetryEvent): v
   }
 }
 
-export function pruneIfDue(_db: Database.Database, _now?: number): { pruned: number } {
-  // implemented in Task 4
-  return { pruned: 0 };
+const RETENTION_DAYS = 30;
+const RETENTION_ROW_CAP = 100_000;
+const PRUNE_INTERVAL_MS = 24 * 3600 * 1000;
+
+export function pruneIfDue(db: Database.Database, now: number = Date.now()): { pruned: number } {
+  try {
+    const row = db.prepare('SELECT value FROM meta WHERE key=?').get('last_prune_ts') as { value: string } | undefined;
+    const last = row ? Number(row.value) : 0;
+    if (last !== 0 && now - last < PRUNE_INTERVAL_MS) {
+      return { pruned: 0 };
+    }
+
+    const cutoff = now - RETENTION_DAYS * 86400000;
+    const timeRes = db.prepare('DELETE FROM events WHERE ts_ms < ?').run(cutoff);
+    const countRes = db.prepare(
+      'DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)'
+    ).run(RETENTION_ROW_CAP);
+
+    db.prepare(
+      "INSERT INTO meta(key, value) VALUES('last_prune_ts', ?) " +
+      "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+    ).run(String(now));
+
+    return { pruned: Number(timeRes.changes) + Number(countRes.changes) };
+  } catch {
+    return { pruned: 0 };
+  }
 }
