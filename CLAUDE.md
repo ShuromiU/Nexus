@@ -7,6 +7,36 @@ Tree-sitter AST parser + SQLite index. Parses symbols, imports, exports, occurre
 - `npm run test` — Vitest suite (~2s)
 - `npm run dev` — Watch mode compile
 - `npm run lint` — Type-check only (`tsc --noEmit`)
+- `nexus install [--dry-run] [--project] [--mcp] [--bake-root]` — register hooks (PreToolUse, PostToolUse, SessionStart) + optionally `.mcp.json` with **absolute paths** in `~/.claude/settings.json`. JSONC-preserving via `jsonc-parser`. Idempotent.
+- `nexus uninstall [--dry-run] [--project]` — remove only Nexus-owned hook entries.
+- `nexus doctor [--json]` — diagnose workspace mode, index health, MCP wiring, hook installation, telemetry.
+
+## Worktrees (Claude Desktop integration)
+
+Claude Desktop's worktree feature lands at `<project>/.claude/worktrees/<name>/`. Three platform constraints shape the design:
+- MCP `cwd` field in `.mcp.json` is **ignored** ([anthropics/claude-code#17565](https://github.com/anthropics/claude-code/issues/17565), closed not-planned). Defense: `nexus install` writes absolute paths and `nexus serve` falls back through `--root` → `NEXUS_ROOT` → `CLAUDE_PROJECT_DIR` → MCP roots → cwd.
+- `WorktreeCreate`/`WorktreeRemove` hooks **don't fire in Desktop** ([#29716](https://github.com/anthropics/claude-code/issues/29716)). Only `SessionStart` does — that's our bootstrap lever.
+- In a worktree, `.git` is a *file* (gitdir pointer), not a directory.
+
+**Two independent concepts:** `WorkspaceMode = standalone | main | worktree` (filesystem) vs `IndexMode = full | overlay-on-parent | worktree-isolated` (effective query strategy). Both reported by `nexus doctor`.
+
+**Hybrid overlay** is used in worktrees only when **all** compat gates pass; otherwise we fall back to a full per-worktree index (`worktree-isolated`) and stamp `meta.degraded_reason`. Coverage is never silently partial. Gates:
+- Parent `meta.clean_at_index_time === true` (computed before any `.nexus/` writes; only `.nexus/` excluded — `.nexus.json`/`.nexusignore` count).
+- Parent `meta.git_head` is set and `git merge-base --is-ancestor parent_git_head HEAD` succeeds in the worktree.
+- Parent `SCHEMA_VERSION`/`EXTRACTOR_VERSION` match current.
+- No tracked or untracked changes to `.nexus.json`, `.nexusignore`, `.gitignore`, `package.json`, root `tsconfig.json`.
+- Change-set size ≤ `MAX_OVERLAY_FILES` (default 500). The change set unions four diff sources: committed (`<base>...HEAD`), staged (`--cached`), unstaged, and untracked (`ls-files --others --exclude-standard`).
+
+**Overlay storage** ([src/db/overlay.ts](src/db/overlay.ts)): a small SQLite file at `<worktree>/.nexus/overlay.db` containing only changed/added/deleted files. Schema mirrors the parent except `module_edges.resolved_file_id` is replaced by `resolved_path` + `resolved_path_key` (cross-file FKs are paths, resolved at query time).
+
+**Query merge** ([src/db/store.ts](src/db/store.ts) `attachOverlay`): on attach, we `ATTACH DATABASE` the overlay, build temp lookup tables (`overlay_path_index`, `changed_or_deleted`), and create TEMP VIEWS named `files`/`symbols`/`module_edges`/`occurrences`/`meta`/`index_runs` that **shadow** the unqualified table names. Direct SQL like `engine.ts:562 'SELECT * FROM symbols'` resolves to the merged view automatically. Parent ids stay positive; overlay ids become negative.
+
+**Three bins** in `package.json`:
+- `nexus` — full CLI (Commander, formatters, indexing). Human commands.
+- `nexus-hook` (NEW) — slim hot-path bin at `dist/transports/hook-entry.js`. Static imports limited to `policy/dispatch-hook` + `workspace/detector`. QueryEngine + extractor adapters loaded via `await import(...)` only when a context-needing rule fires. Used by all hooks installed by `nexus install`.
+- `nexus-policy-check` — back-compat bin; shares `runPolicyHook` with `nexus-hook`.
+
+**Known v1 limitation:** parent's stored `module_edges.symbol_id` references the parent's symbols table. If a now-modified overlay file renamed the bound symbol, callers/importers queries crossing that boundary may show best-effort results. File-level resolution is correct; symbol-level cross-boundary is best-effort.
 
 ## Architecture
 

@@ -6,7 +6,7 @@ import type { FileRow, SymbolRow, ModuleEdgeRow, OccurrenceRow } from '../db/sto
 import { IndexLock } from './state.js';
 import { loadConfig, computeConfigHash } from '../config.js';
 import type { NexusConfig } from '../config.js';
-import { detectRoot, detectCaseSensitivity, getGitHead } from '../workspace/detector.js';
+import { detectRoot, detectCaseSensitivity, getGitHead, gitStatusClean } from '../workspace/detector.js';
 import { buildIgnoreMatcher } from '../workspace/ignores.js';
 import { scanDirectory } from '../workspace/scanner.js';
 import { detectChanges, summarizeChanges, readAndHash } from '../workspace/changes.js';
@@ -16,7 +16,7 @@ import { extractFile, extractSource } from '../analysis/extractor.js';
 // ── Types ───────────────────────────────────────────────────────────────
 
 export interface IndexResult {
-  mode: 'full' | 'incremental';
+  mode: 'full' | 'incremental' | 'overlay-on-parent' | 'worktree-isolated';
   filesScanned: number;
   filesIndexed: number;
   filesSkipped: number;
@@ -58,6 +58,11 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
   const caseSensitive = detectCaseSensitivity(rootDir);
   const gitHead = getGitHead(rootDir);
 
+  // Compute clean_at_index_time BEFORE we touch .nexus/ — we ignore .nexus/
+  // artifacts (Nexus's own DB) but DO count .nexus.json / .nexusignore as
+  // user config that affects indexing.
+  const cleanAtIndexTime = gitStatusClean(rootDir, { ignorePaths: ['.nexus/'] });
+
   const dbPath = path.join(rootDir, '.nexus', 'index.db');
   ensureDir(path.dirname(dbPath));
 
@@ -81,7 +86,17 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
       initializeMeta(db, rootDir, caseSensitive);
       store.setMeta('config_hash', configHash);
       if (gitHead) store.setMeta('git_head', gitHead);
+    } else {
+      // Incremental rebuild — refresh git_head so the meta reflects the
+      // current snapshot the index was built against.
+      if (gitHead) store.setMeta('git_head', gitHead);
     }
+    // Always record the cleanliness of the working tree at index time.
+    // This is the gate that decides whether a worktree session can use this
+    // index as an overlay base (Phase E: overlay-orchestrator). Captured
+    // before any .nexus/ writes — see `cleanAtIndexTime` above.
+    store.setMeta('clean_at_index_time', cleanAtIndexTime ? 'true' : 'false');
+    store.setMeta('index_mode', 'full');
 
     // ── Phase 1: Scan + Parse (no write lock) ───────────────────────
     const isIgnored = buildIgnoreMatcher(rootDir, config.exclude);

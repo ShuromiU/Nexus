@@ -337,13 +337,37 @@ export interface LockfileDepsResult {
 
 // ── Query Engine ──────────────────────────────────────────────────────
 
+export interface QueryEngineOptions {
+  /**
+   * Override the source-file root used by methods that read disk content
+   * (grep, source, outline line counts, structured/lockfile loaders, etc.).
+   *
+   * Defaults to `store.getMeta('root_path')` when unset, which matches the
+   * pre-worktree behavior. In a worktree session, callers should pass
+   * `info.sourceRoot` from `detectWorkspace()` so source reads hit the
+   * worktree's checkout even when the index DB lives at the parent root.
+   */
+  sourceRoot?: string;
+}
+
 export class QueryEngine {
   private store: NexusStore;
   private db: Database.Database;
+  private sourceRootOverride: string | null;
 
-  constructor(db: Database.Database) {
+  constructor(db: Database.Database, opts: QueryEngineOptions = {}) {
     this.db = db;
     this.store = new NexusStore(db);
+    this.sourceRootOverride = opts.sourceRoot ?? null;
+  }
+
+  /**
+   * Returns the on-disk root for source reads. Prefers the constructor
+   * override (set in worktree mode); falls back to `meta.root_path` for
+   * backward-compat with callers that didn't supply one.
+   */
+  private getSourceRoot(): string {
+    return this.sourceRootOverride ?? this.store.getMeta('root_path') ?? '';
   }
 
   /**
@@ -666,7 +690,7 @@ export class QueryEngine {
       return this.wrap('grep', `grep ${pattern}`, [], start);
     }
 
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const files = this.store.getFilePaths({
       language: language ?? undefined,
       pathPrefix: pathPrefix ?? undefined,
@@ -717,7 +741,7 @@ export class QueryEngine {
     const fileCounts = this.store.getFileCount();
     const symbolCount = this.store.getSymbolCount();
     const langStats = this.store.getLanguageStats();
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const lastIndexed = this.store.getMeta('last_indexed_at') ?? '';
     const { status, health } = this.getIndexState();
 
@@ -828,7 +852,7 @@ export class QueryEngine {
     }
 
     // Count lines from disk
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     let lineCount = 0;
     try {
       const content = fs.readFileSync(path.resolve(root, file.path), 'utf-8');
@@ -914,7 +938,7 @@ export class QueryEngine {
       if (filtered.length > 0) joined = filtered;
     }
 
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const results: SourceResult[] = [];
 
     // Group by file to avoid re-reading
@@ -1399,7 +1423,7 @@ export class QueryEngine {
     const file = this.findFile(filePath);
     if (!file) return this.wrap('definition_at', query, [], start);
 
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     let lineText: string;
     try {
       const content = fs.readFileSync(path.resolve(root, file.path), 'utf-8');
@@ -1623,7 +1647,7 @@ export class QueryEngine {
     const ref = opts?.ref ?? 'HEAD~1';
     const queryStr = `changed --ref ${ref}`;
 
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const indexedByPath = new Map<string, FileRow & { id: number }>();
     for (const f of this.store.getAllFiles()) {
       indexedByPath.set(normalizePath(f.path), f);
@@ -1689,7 +1713,7 @@ export class QueryEngine {
     const target = refB ?? 'HEAD';
     const queryStr = `diff_outline ${refA} ${target}`;
 
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const indexedByPath = new Map<string, FileRow & { id: number }>();
     for (const f of this.store.getAllFiles()) {
       indexedByPath.set(normalizePath(f.path), f);
@@ -1801,7 +1825,7 @@ export class QueryEngine {
    * fallback when the extractor did not record one.
    */
   private getSourceForSymbol(symbol: SymbolWithFile): SourceResult | null {
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     let lines: string[];
     try {
       const content = fs.readFileSync(path.resolve(root, symbol.file_path), 'utf-8');
@@ -1846,7 +1870,7 @@ export class QueryEngine {
    */
   structuredQuery(filePath: string, queryPath: string): NexusResult<StructuredQueryResult> {
     const start = performance.now();
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(root, filePath);
     const basename = path.basename(filePath);
     const rel = root ? normalizePath(path.relative(root, absPath)) : normalizePath(filePath);
@@ -1881,7 +1905,7 @@ export class QueryEngine {
    */
   structuredOutline(filePath: string): NexusResult<StructuredOutlineFileResult> {
     const start = performance.now();
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(root, filePath);
     const basename = path.basename(filePath);
     const rel = root ? normalizePath(path.relative(root, absPath)) : normalizePath(filePath);
@@ -1928,7 +1952,7 @@ export class QueryEngine {
    */
   lockfileDeps(filePath: string, name?: string): NexusResult<LockfileDepsResult> {
     const start = performance.now();
-    const root = this.store.getMeta('root_path') ?? '';
+    const root = this.getSourceRoot();
     const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(root, filePath);
     const basename = path.basename(filePath);
     const rel = root ? normalizePath(path.relative(root, absPath)) : normalizePath(filePath);

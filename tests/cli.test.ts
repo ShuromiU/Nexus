@@ -473,12 +473,13 @@ describe('lockfile-deps command', () => {
 });
 
 describe('package.json bins', () => {
-  it('registers nexus-policy-check alongside nexus', () => {
+  it('registers nexus, nexus-hook, and nexus-policy-check', () => {
     const pkg = JSON.parse(
       readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
     ) as { bin: Record<string, string> };
     expect(pkg.bin).toEqual({
       nexus: 'dist/transports/cli.js',
+      'nexus-hook': 'dist/transports/hook-entry.js',
       'nexus-policy-check': 'dist/transports/policy-entry.js',
     });
   });

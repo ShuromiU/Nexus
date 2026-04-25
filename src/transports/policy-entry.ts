@@ -9,126 +9,27 @@
  *   - Exits 0 unless something truly unrecoverable happens.
  *   - Does NOT re-index. stale_hint advertises whether the answer may lag.
  *   - Must not import Commander or MCP SDK — stay small and fast.
+ *
+ * Retained for back-compat with installs that still call this bin directly.
+ * New installs (`nexus install`) point hooks at the `nexus-hook` bin instead,
+ * but both share `runPolicyHook` from `src/policy/dispatch-hook.ts`.
  */
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { detectRoot } from '../workspace/detector.js';
-import { dispatchPolicy } from '../policy/dispatcher.js';
-import { DEFAULT_RULES } from '../policy/index.js';
-import type { PolicyEvent, PolicyResponse, QueryEngineLike } from '../policy/types.js';
-import { openDatabase } from '../db/schema.js';
-import { QueryEngine } from '../query/engine.js';
-import {
-  openTelemetryDb,
-  closeTelemetryDb,
-  pruneIfDue,
-  recordOptOutTransition,
-} from '../policy/telemetry.js';
-import { isTelemetryEnabled, computeInputHash } from '../policy/telemetry-config.js';
+import { runPolicyHook, readStdinSync } from '../policy/dispatch-hook.js';
 
-function readStdinSync(): string {
-  try {
-    const chunks: Buffer[] = [];
-    const buf = Buffer.alloc(65536);
-    for (;;) {
-      let n = 0;
-      try {
-        n = fs.readSync(0, buf, 0, buf.length, null);
-      } catch (err: unknown) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'EAGAIN') continue;
-        break;
-      }
-      if (n <= 0) break;
-      chunks.push(Buffer.from(buf.subarray(0, n)));
-    }
-    return Buffer.concat(chunks).toString('utf-8');
-  } catch {
-    return '';
-  }
-}
-
-function parseEvent(raw: string): PolicyEvent | null {
-  try {
-    const obj = JSON.parse(raw) as Partial<PolicyEvent>;
-    if (typeof obj.tool_name !== 'string') return null;
-    const hasToolResponse = obj.tool_response && typeof obj.tool_response === 'object';
-    return {
-      hook_event_name: typeof obj.hook_event_name === 'string' ? obj.hook_event_name : 'PreToolUse',
-      tool_name: obj.tool_name,
-      tool_input: (obj.tool_input ?? {}) as Record<string, unknown>,
-      ...(hasToolResponse
-        ? { tool_response: obj.tool_response as Record<string, unknown> }
-        : {}),
-      session_id: typeof obj.session_id === 'string' ? obj.session_id : undefined,
-      cwd: typeof obj.cwd === 'string' ? obj.cwd : undefined,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function tryOpenEngine(rootDir: string): QueryEngineLike | undefined {
-  try {
-    const dbPath = path.join(rootDir, '.nexus', 'index.db');
-    if (!fs.existsSync(dbPath)) return undefined;
-    const db = openDatabase(dbPath, { readonly: true });
-    return new QueryEngine(db) as unknown as QueryEngineLike;
-  } catch {
-    return undefined;
-  }
-}
-
-function main(): void {
+async function main(): Promise<void> {
   const raw = readStdinSync();
-  const event = parseEvent(raw);
-
-  if (!event) {
-    const response: PolicyResponse = {
-      decision: 'allow',
-      rule: 'parse-error',
-      reason: 'malformed hook payload',
-      stale_hint: false,
-    };
-    process.stdout.write(JSON.stringify(response));
-    return;
-  }
-
-  const cwd = event.cwd ?? process.cwd();
-  let rootDir: string;
-  try {
-    rootDir = detectRoot(cwd);
-  } catch {
-    rootDir = cwd;
-  }
-
-  // Telemetry boundary: detect transition first, then conditionally open + prune.
-  const enabled = isTelemetryEnabled(rootDir);
-  recordOptOutTransition(rootDir, enabled);
-  const telemetryDb = enabled ? openTelemetryDb(rootDir) : null;
-  if (telemetryDb) {
-    try { pruneIfDue(telemetryDb); } catch { /* swallow */ }
-  }
-  const inputHash = computeInputHash(event.tool_input);
-
-  const queryEngine = tryOpenEngine(rootDir);
-
-  try {
-    const response = dispatchPolicy(event, {
-      rootDir,
-      rules: DEFAULT_RULES,
-      ...(queryEngine ? { queryEngine } : {}),
-      ...(telemetryDb ? { telemetryDb } : {}),
-      inputHash,
-    });
-    process.stdout.write(JSON.stringify(response));
-  } finally {
-    if (telemetryDb) closeTelemetryDb(telemetryDb);
-  }
+  const response = await runPolicyHook(raw);
+  process.stdout.write(response);
 }
 
-const isDirectRun = process.argv[1]?.replace(/\\/g, '/').endsWith('transports/policy-entry.js')
-  || process.argv[1]?.replace(/\\/g, '/').endsWith('transports/policy-entry.ts');
+const argv1 = process.argv[1] ?? '';
+const norm = argv1.replace(/\\/g, '/');
+const isDirectRun = norm.endsWith('transports/policy-entry.js') || norm.endsWith('transports/policy-entry.ts');
 
-if (isDirectRun) main();
+if (isDirectRun) {
+  main().catch((err) => {
+    process.stderr.write(`[nexus-policy-check] fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
+}

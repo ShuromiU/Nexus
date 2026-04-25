@@ -8,7 +8,7 @@ import { runIndex } from '../index/orchestrator.js';
 import { openDatabase, applySchema } from '../db/schema.js';
 import { QueryEngine } from '../query/engine.js';
 import { repair } from '../db/integrity.js';
-import { detectRoot, detectCaseSensitivity } from '../workspace/detector.js';
+import { detectRoot, detectCaseSensitivity, resolveRoot } from '../workspace/detector.js';
 import type {
   SymbolResult, OccurrenceResult, ModuleEdgeResult,
   TreeEntry, IndexStats, NexusResult, ImporterResult, GrepResult,
@@ -462,7 +462,46 @@ function printEnvelope<T>(result: NexusResult<T>, body: string): void {
   console.log(`  ${result.count} result(s) in ${result.timing_ms}ms | index: ${result.index_status}, health: ${result.index_health}`);
 }
 
+// ── Install printing helper ───────────────────────────────────────────
+
+function printInstallPlan(
+  plan: import('./install.js').InstallPlan,
+  dryRun: boolean,
+): void {
+  const tag = dryRun ? '[dry-run]' : '[install]';
+  console.log(`${tag} settings: ${plan.settings.filePath}`);
+  for (const c of plan.settings.changes) {
+    console.log(`  ${c.hook.padEnd(14)} ${c.action.padEnd(10)} ${c.detail}`);
+  }
+  if (plan.mcp) {
+    console.log(`${tag} mcp: ${plan.mcp.filePath}`);
+    for (const c of plan.mcp.changes) {
+      console.log(`  ${c.hook.padEnd(20)} ${c.action.padEnd(10)} ${c.detail}`);
+    }
+  }
+  if (dryRun) {
+    console.log('');
+    console.log('--- proposed settings.json ---');
+    console.log(plan.settings.afterContent || '(file would be deleted/empty)');
+    if (plan.mcp) {
+      console.log('');
+      console.log('--- proposed .mcp.json ---');
+      console.log(plan.mcp.afterContent || '(file would be deleted/empty)');
+    }
+  }
+}
+
 // ── DB Helpers ────────────────────────────────────────────────────────
+
+/**
+ * Resolve the starting directory for CLI command actions using the shared
+ * precedence chain (--root > NEXUS_ROOT > CLAUDE_PROJECT_DIR > MCP roots > cwd).
+ * Inside Commander action handlers we use this instead of `process.cwd()` so
+ * that `NEXUS_ROOT` and `CLAUDE_PROJECT_DIR` are honored consistently.
+ */
+function workingRoot(): string {
+  return resolveRoot().startDir;
+}
 
 function openQueryDb(startDir: string): { db: ReturnType<typeof openDatabase>; rootDir: string; dbPath: string } {
   const rootDir = detectRoot(startDir);
@@ -492,11 +531,33 @@ export function createProgram(): Command {
 
   program
     .command('build')
-    .description('Build or update the index')
+    .description('Build or update the index (auto-routes to overlay in worktree mode)')
     .option('--incremental', 'Run incremental update (default behavior)')
-    .action((_opts) => {
+    .action(async (_opts) => {
       try {
-        const result = runIndex(process.cwd());
+        const { detectWorkspace } = await import('../workspace/detector.js');
+        const info = detectWorkspace(workingRoot());
+
+        if (info.mode === 'worktree') {
+          const { buildWorktreeIndex } = await import('../index/overlay-orchestrator.js');
+          const outcome = buildWorktreeIndex(info);
+          if (outcome.kind === 'overlay') {
+            const r = outcome.result;
+            console.log(`Index overlay-on-parent build complete:`);
+            console.log(`  parent=${info.baseIndexPath}`);
+            console.log(`  overlay=${info.overlayPath}`);
+            console.log(`  ${r.filesScanned} scanned, ${r.filesIndexed} indexed, ${r.filesSkipped} skipped, ${r.filesErrored} errored`);
+            console.log(`  ${r.durationMs}ms`);
+          } else {
+            const r = outcome.result;
+            console.log(`Index worktree-isolated build complete (degraded: ${outcome.reason}):`);
+            console.log(`  ${r.filesScanned} scanned, ${r.filesIndexed} indexed, ${r.filesSkipped} skipped, ${r.filesErrored} errored`);
+            console.log(`  ${r.durationMs}ms`);
+          }
+          return;
+        }
+
+        const result = runIndex(workingRoot());
         console.log(`Index ${result.mode} build complete:`);
         console.log(`  ${result.filesScanned} scanned, ${result.filesIndexed} indexed, ${result.filesSkipped} skipped, ${result.filesErrored} errored`);
         console.log(`  ${result.durationMs}ms`);
@@ -514,7 +575,7 @@ export function createProgram(): Command {
     .option('--force', 'Force full rebuild (default for rebuild)')
     .action((_opts) => {
       try {
-        const result = runIndex(process.cwd(), true);
+        const result = runIndex(workingRoot(), true);
         console.log(`Full rebuild complete:`);
         console.log(`  ${result.filesScanned} scanned, ${result.filesIndexed} indexed, ${result.filesSkipped} skipped, ${result.filesErrored} errored`);
         console.log(`  ${result.durationMs}ms`);
@@ -531,7 +592,7 @@ export function createProgram(): Command {
     .description('Find where a symbol is defined')
     .option('-k, --kind <kind>', 'Filter by symbol kind (function, class, interface, etc.)')
     .action((name: string, opts: { kind?: string }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.find(name, opts.kind);
@@ -548,7 +609,7 @@ export function createProgram(): Command {
     .description('Find all occurrences of an identifier')
     .option('--ref-kinds <kinds>', 'comma-separated: call,read,write,type-ref,declaration')
     .action((name: string, opts: { refKinds?: string }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.occurrences(name, {
@@ -566,7 +627,7 @@ export function createProgram(): Command {
     .command('exports <file>')
     .description('List what a file exports')
     .action((file: string) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.exports(file);
@@ -582,7 +643,7 @@ export function createProgram(): Command {
     .command('imports <file>')
     .description('List what a file imports')
     .action((file: string) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.imports(file);
@@ -598,7 +659,7 @@ export function createProgram(): Command {
     .command('importers <source>')
     .description('Find all files that import from a source module')
     .action((source: string) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.importers(source);
@@ -614,7 +675,7 @@ export function createProgram(): Command {
     .command('tree [path]')
     .description('List indexed files under a path prefix with export summaries')
     .action((pathPrefix?: string) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.tree(pathPrefix);
@@ -632,7 +693,7 @@ export function createProgram(): Command {
     .option('-l, --limit <n>', 'Max results', '20')
     .option('-p, --path <prefix>', 'Path prefix filter')
     .action((query: string, opts: { limit: string; path?: string }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const limit = parseInt(opts.limit, 10) || 20;
@@ -671,7 +732,7 @@ export function createProgram(): Command {
     .option('--lang <language>', 'Language filter')
     .option('-l, --limit <n>', 'Max results', '50')
     .action((pattern: string, opts: { path?: string; lang?: string; limit: string }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const limit = parseInt(opts.limit, 10) || 50;
@@ -688,7 +749,7 @@ export function createProgram(): Command {
     .command('outline <files...>')
     .description('Structural outline of a file — symbols, imports, exports')
     .action((files: string[]) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         if (files.length === 1) {
@@ -714,7 +775,7 @@ export function createProgram(): Command {
     .description('Extract source code for a symbol')
     .option('-f, --file <file>', 'Narrow to a specific file')
     .action((name: string, opts: { file?: string }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.source(name, opts.file);
@@ -731,7 +792,7 @@ export function createProgram(): Command {
     .option('-l, --limit <n>', 'Max referenced symbols', '20')
     .option('--ref-kinds <kinds>', 'comma-separated: call,read,write,type-ref,declaration')
     .action((name: string, opts: { file?: string; limit: string; refKinds?: string }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const limit = parseInt(opts.limit, 10) || 20;
@@ -758,7 +819,7 @@ export function createProgram(): Command {
     .option('-d, --direction <dir>', 'imports or importers', 'imports')
     .option('--depth <n>', 'Max depth (1-5)', '2')
     .action((file: string, opts: { direction: string; depth: string }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const direction = opts.direction === 'importers' ? 'importers' as const : 'imports' as const;
@@ -780,7 +841,7 @@ export function createProgram(): Command {
     .command('stats')
     .description('Show index summary and per-language capabilities')
     .action(() => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.stats();
@@ -796,7 +857,7 @@ export function createProgram(): Command {
     .command('repair')
     .description('Run full integrity check, rebuild if corrupt')
     .action(() => {
-      const rootDir = detectRoot(process.cwd());
+      const rootDir = detectRoot(workingRoot());
       const dbPath = path.join(rootDir, '.nexus', 'index.db');
 
       if (!fs.existsSync(dbPath)) {
@@ -832,7 +893,7 @@ export function createProgram(): Command {
     .option('--ref-kinds <kinds>', 'comma-separated: call,read,write,type-ref,declaration')
     .option('--pretty', 'Pretty-print JSON')
     .action((name: string, opts: { file?: string; depth: string; limit: string; refKinds?: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.callers(name, {
@@ -854,7 +915,7 @@ export function createProgram(): Command {
     .option('-p, --paths <paths>', 'Comma-separated path prefixes')
     .option('--pretty', 'Pretty-print JSON')
     .action((query: string, opts: { budget: string; paths?: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.pack(query, {
@@ -873,7 +934,7 @@ export function createProgram(): Command {
     .option('-r, --ref <ref>', 'Git ref to compare against', 'HEAD~1')
     .option('--pretty', 'Pretty-print JSON')
     .action((opts: { ref: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.changed({ ref: opts.ref });
@@ -888,7 +949,7 @@ export function createProgram(): Command {
     .description('Semantic diff of symbols between two git refs')
     .option('--pretty', 'Pretty-print JSON')
     .action((refA: string, refB: string | undefined, opts: { pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.diffOutline(refA, refB);
@@ -905,7 +966,7 @@ export function createProgram(): Command {
     .option('-k, --kind <kind>', 'Optional kind filter')
     .option('--pretty', 'Pretty-print JSON')
     .action((names: string[], opts: { file?: string; kind?: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.signatures(names, { file: opts.file, kind: opts.kind });
@@ -920,7 +981,7 @@ export function createProgram(): Command {
     .description('Resolve identifier at file:line[:col] to its definition source')
     .option('--pretty', 'Pretty-print JSON')
     .action((file: string, line: string, col: string | undefined, opts: { pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.definitionAt(file, parseInt(line, 10), col ? parseInt(col, 10) : undefined);
@@ -938,7 +999,7 @@ export function createProgram(): Command {
     .option('--mode <mode>', 'default|runtime_only', 'default')
     .option('--pretty', 'Pretty-print JSON')
     .action((opts: { path?: string; limit: string; mode?: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.unusedExports({
@@ -959,7 +1020,7 @@ export function createProgram(): Command {
     .option('-l, --limit <n>', 'Max results', '200')
     .option('--pretty', 'Pretty-print JSON')
     .action((kind: string, opts: { path?: string; limit: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.kindIndex(kind, {
@@ -978,7 +1039,7 @@ export function createProgram(): Command {
     .option('-f, --file <file>', 'Optional file scope')
     .option('--pretty', 'Pretty-print JSON')
     .action((name: string, opts: { file?: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.doc(name, { file: opts.file });
@@ -993,7 +1054,7 @@ export function createProgram(): Command {
     .description('Extract a value from a structured config file by dotted path (e.g. "compilerOptions.strict")')
     .option('--pretty', 'Pretty-print JSON')
     .action((file: string, queryPath: string, opts: { pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.structuredQuery(file, queryPath);
@@ -1008,7 +1069,7 @@ export function createProgram(): Command {
     .description('List top-level keys of a structured config file with value kinds')
     .option('--pretty', 'Pretty-print JSON')
     .action((file: string, opts: { pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.structuredOutline(file);
@@ -1025,7 +1086,7 @@ export function createProgram(): Command {
     .description('List {name, version} entries from a lockfile (yarn.lock, package-lock.json, pnpm-lock.yaml, Cargo.lock)')
     .option('--pretty', 'Pretty-print JSON')
     .action((file: string, name: string | undefined, opts: { pretty?: boolean }) => {
-      const { db } = openQueryDb(process.cwd());
+      const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
         const result = engine.lockfileDeps(file, name);
@@ -1045,7 +1106,7 @@ export function createProgram(): Command {
     .option('--since <spec>', 'Time window: 30d, 7d, 1h', '30d')
     .option('--json', 'Emit JSON')
     .action((opts: { since?: string; json?: boolean }) => {
-      const root = detectRoot(process.cwd());
+      const root = detectRoot(workingRoot());
       const stats = computeTelemetryStats(root, opts.since);
       if (!stats || Object.keys(stats.rules).length === 0) {
         if (opts.json) {
@@ -1069,7 +1130,7 @@ export function createProgram(): Command {
     .option('--since <spec>', 'Time window: 30d, 7d, 1h', '30d')
     .option('--format <fmt>', 'ndjson | csv', 'ndjson')
     .action((opts: { since?: string; format?: string }) => {
-      const root = detectRoot(process.cwd());
+      const root = detectRoot(workingRoot());
       const fmt: 'ndjson' | 'csv' = opts.format === 'csv' ? 'csv' : 'ndjson';
       exportTelemetry(root, opts.since, fmt);
     });
@@ -1079,7 +1140,7 @@ export function createProgram(): Command {
     .description('Delete .nexus/telemetry.db')
     .option('--yes', 'Confirm deletion (required)')
     .action((opts: { yes?: boolean }) => {
-      const root = detectRoot(process.cwd());
+      const root = detectRoot(workingRoot());
       const dbPath = path.join(root, '.nexus', 'telemetry.db');
       if (!opts.yes) {
         console.log('telemetry purge: re-run with --yes to confirm.');
@@ -1107,7 +1168,53 @@ export function createProgram(): Command {
     .description('Start MCP server (stdio transport)')
     .action(async () => {
       const { startServer } = await import('./mcp.js');
-      await startServer(process.cwd());
+      await startServer(workingRoot());
+    });
+
+  // ── doctor ─────────────────────────────────────────────────────────
+
+  program
+    .command('install')
+    .description('Install Nexus hook entries (and optionally MCP server) into Claude Code settings.json')
+    .option('--dry-run', 'Show the planned diff without writing')
+    .option('--project', 'Install into the project .claude/settings.json instead of the user-scope file')
+    .option('--mcp', 'Also write/update the project-root .mcp.json with absolute-path nexus server entry')
+    .option('--bake-root', 'Add `--root <resolved>` to the MCP args (worktree-local installs only)')
+    .action(async (opts: { dryRun?: boolean; project?: boolean; mcp?: boolean; bakeRoot?: boolean }) => {
+      const { planInstall, applyInstall } = await import('./install.js');
+      const plan = planInstall({
+        ...(opts.project ? { project: true } : {}),
+        ...(opts.mcp ? { mcp: true } : {}),
+        ...(opts.bakeRoot ? { bakeRoot: true } : {}),
+      });
+      printInstallPlan(plan, !!opts.dryRun);
+      if (!opts.dryRun) applyInstall(plan);
+    });
+
+  program
+    .command('uninstall')
+    .description('Remove Nexus-owned hook entries from Claude Code settings.json')
+    .option('--dry-run', 'Show the planned diff without writing')
+    .option('--project', 'Uninstall from the project .claude/settings.json instead of the user-scope file')
+    .action(async (opts: { dryRun?: boolean; project?: boolean }) => {
+      const { planUninstall, applyInstall } = await import('./install.js');
+      const plan = planUninstall(opts.project ? { project: true } : {});
+      printInstallPlan(plan, !!opts.dryRun);
+      if (!opts.dryRun) applyInstall(plan);
+    });
+
+  program
+    .command('doctor')
+    .description('Diagnose Nexus setup: workspace mode, index health, MCP/hook wiring, binaries')
+    .option('--json', 'Emit machine-readable JSON instead of human text')
+    .action(async (opts: { json?: boolean }) => {
+      const { buildDoctorReport, formatDoctorReport } = await import('./doctor.js');
+      const report = buildDoctorReport();
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        process.stdout.write(formatDoctorReport(report));
+      }
     });
 
   return program;

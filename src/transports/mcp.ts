@@ -13,7 +13,9 @@ import { QueryEngine } from '../query/engine.js';
 import type { NexusResult } from '../query/engine.js';
 import { compactify } from '../query/compact.js';
 import { runIndex } from '../index/orchestrator.js';
-import { detectRoot } from '../workspace/detector.js';
+import { buildWorktreeIndex } from '../index/overlay-orchestrator.js';
+import { detectRoot, detectWorkspace, resolveRoot, type WorkspaceInfo } from '../workspace/detector.js';
+import { NexusStore } from '../db/store.js';
 import type Database from 'better-sqlite3';
 import { dispatchPolicy } from '../policy/dispatcher.js';
 import { DEFAULT_RULES } from '../policy/index.js';
@@ -31,6 +33,8 @@ import '../analysis/languages/csharp.js';
 
 let db: Database.Database | null = null;
 let engine: QueryEngine | null = null;
+let workspaceInfo: WorkspaceInfo | null = null;
+let effectiveIndexMode: 'full' | 'overlay-on-parent' | 'worktree-isolated' = 'full';
 let indexRootDir: string | null = null;
 let lastFreshnessCheck = 0;
 const FRESHNESS_INTERVAL = parseInt(process.env.NEXUS_FRESHNESS_INTERVAL ?? '30000', 10); // ms, default 30s
@@ -41,17 +45,56 @@ function getEngine(): QueryEngine {
 }
 
 /**
- * Ensure index is fresh before queries. If more than FRESHNESS_INTERVAL ms
- * since the last check, run an incremental reindex. The incremental mode
- * uses mtime/size/hash detection — if nothing changed, it's fast (~100ms).
+ * Open the query engine for the current workspace, using the merged TEMP
+ * views when in worktree+overlay mode. Caller must close the previous handle
+ * via `closeEngine()` before calling.
+ */
+function openEngine(info: WorkspaceInfo, indexMode: typeof effectiveIndexMode): void {
+  if (info.mode === 'worktree' && indexMode === 'overlay-on-parent') {
+    // Parent index opened read-only; overlay attached read-only via URI mode=ro.
+    db = openDatabase(info.baseIndexPath, { readonly: true });
+    const store = new NexusStore(db);
+    store.attachOverlay(info.overlayPath);
+    engine = new QueryEngine(db, { sourceRoot: info.sourceRoot });
+  } else {
+    // Standalone, main, or worktree-isolated: single self-contained index.
+    const dbPath = info.mode === 'worktree'
+      ? path.join(info.root, '.nexus', 'index.db')
+      : path.join(info.root, '.nexus', 'index.db');
+    db = openDatabase(dbPath);
+    applySchema(db);
+    engine = new QueryEngine(db, { sourceRoot: info.sourceRoot });
+  }
+  effectiveIndexMode = indexMode;
+}
+
+function closeEngine(): void {
+  try { db?.close(); } catch { /* ignore */ }
+  db = null;
+  engine = null;
+}
+
+/**
+ * Ensure index is fresh before queries. Routes via effective index mode:
+ *   - overlay-on-parent → rebuild overlay against parent_git_head
+ *   - full / worktree-isolated → existing runIndex on the worktree's own root
  */
 function ensureFresh(): void {
-  if (!indexRootDir) return;
+  if (!workspaceInfo) return;
   const now = Date.now();
   if (now - lastFreshnessCheck < FRESHNESS_INTERVAL) return;
 
   try {
-    runIndex(indexRootDir);
+    if (workspaceInfo.mode === 'worktree' && effectiveIndexMode === 'overlay-on-parent') {
+      const outcome = buildWorktreeIndex(workspaceInfo);
+      // Re-open engine handle to pick up the freshly-published overlay
+      // (Windows-safe: builder writes to .tmp + atomic rename; we close
+      // before the next-attach implicit re-read).
+      closeEngine();
+      openEngine(workspaceInfo, outcome.kind === 'overlay' ? 'overlay-on-parent' : 'worktree-isolated');
+    } else if (indexRootDir) {
+      runIndex(indexRootDir);
+    }
   } catch (err) {
     console.error(`Freshness check warning: ${err instanceof Error ? err.message : err}`);
   }
@@ -59,30 +102,55 @@ function ensureFresh(): void {
 }
 
 /**
- * Initialize the index: detect root, open DB, run incremental reindex.
- * Called on server startup. Queries can proceed with stale data during reindex.
+ * Initialize the index: detect workspace, run incremental reindex (or
+ * overlay build for worktrees), open DB for queries.
  */
 function initializeIndex(startDir: string): void {
-  const rootDir = detectRoot(startDir);
-  indexRootDir = rootDir;
-  const dbPath = path.join(rootDir, '.nexus', 'index.db');
+  const info = detectWorkspace(startDir);
+  workspaceInfo = info;
+  indexRootDir = info.root;
 
-  // Ensure .nexus directory exists
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  // Ensure .nexus directory exists at the worktree root (overlay or isolated lives here)
+  fs.mkdirSync(path.join(info.root, '.nexus'), { recursive: true });
 
-  // Run incremental index (creates DB if needed)
+  // Build the appropriate index. Worktree mode chooses overlay vs isolated
+  // based on compat gates; standalone/main always go through runIndex.
+  let mode: typeof effectiveIndexMode = 'full';
   try {
-    runIndex(rootDir);
+    if (info.mode === 'worktree') {
+      const outcome = buildWorktreeIndex(info);
+      mode = outcome.kind === 'overlay' ? 'overlay-on-parent' : 'worktree-isolated';
+      emitStartupBanner(info, mode, outcome.kind === 'isolated' ? outcome.reason : null);
+    } else {
+      runIndex(info.root);
+      mode = 'full';
+      emitStartupBanner(info, mode, null);
+    }
   } catch (err) {
-    // Log but don't crash — stale index is better than no server
     console.error(`Reindex warning: ${err instanceof Error ? err.message : err}`);
   }
 
-  // Open DB for queries
-  db = openDatabase(dbPath);
-  applySchema(db);
-  engine = new QueryEngine(db);
+  openEngine(info, mode);
   lastFreshnessCheck = Date.now();
+}
+
+function emitStartupBanner(
+  info: WorkspaceInfo,
+  mode: typeof effectiveIndexMode,
+  degradedReason: string | null,
+): void {
+  const resolved = resolveRoot();
+  const rootSrc = resolved.source;
+  const fs = info.mode;
+  if (fs === 'worktree') {
+    if (mode === 'overlay-on-parent') {
+      console.error(`[nexus] fs=worktree index=overlay-on-parent root=${info.root} parent=${info.parentRoot} root_src=${rootSrc}`);
+    } else {
+      console.error(`[nexus] fs=worktree index=worktree-isolated reason=${degradedReason ?? 'unknown'} root=${info.root} root_src=${rootSrc}`);
+    }
+  } else {
+    console.error(`[nexus] fs=${fs} index=${mode} root=${info.root} root_src=${rootSrc}`);
+  }
 }
 
 // ── MCP Server ────────────────────────────────────────────────────────
@@ -748,7 +816,7 @@ export function createMcpServer(): Server {
 
 export async function startServer(startDir?: string): Promise<void> {
   // Initialize index before accepting queries
-  initializeIndex(startDir ?? process.cwd());
+  initializeIndex(startDir ?? resolveRoot().startDir);
 
   const server = createMcpServer();
   const transport = new StdioServerTransport();

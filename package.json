@@ -13,6 +13,7 @@
   },
   "bin": {
     "nexus": "dist/transports/cli.js",
+    "nexus-hook": "dist/transports/hook-entry.js",
     "nexus-policy-check": "dist/transports/policy-entry.js"
   },
   "files": [

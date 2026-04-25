@@ -3,7 +3,21 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { loadConfig, computeConfigHash } from '../src/config.js';
-import { detectRoot, detectCaseSensitivity, getGitHead } from '../src/workspace/detector.js';
+import { spawnSync } from 'node:child_process';
+import {
+  detectRoot,
+  detectWorkspace,
+  detectCaseSensitivity,
+  getGitHead,
+  resolveRoot,
+  gitHead,
+  gitStatusClean,
+  gitDiffNameStatus,
+  gitDiffStaged,
+  gitDiffUnstaged,
+  gitLsFilesUntracked,
+  gitMergeBaseIsAncestor,
+} from '../src/workspace/detector.js';
 import { buildIgnoreMatcher } from '../src/workspace/ignores.js';
 import { scanDirectory } from '../src/workspace/scanner.js';
 import { detectChanges, hashFile, summarizeChanges } from '../src/workspace/changes.js';
@@ -140,15 +154,257 @@ describe('Detector', () => {
     expect(getGitHead(dir)).toBeNull();
   });
 
-  it('getGitHead reads HEAD for git dirs', () => {
-    // Create a fake .git with a HEAD ref
-    fs.mkdirSync(path.join(dir, '.git', 'refs', 'heads'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
-    fs.writeFileSync(
-      path.join(dir, '.git', 'refs', 'heads', 'main'),
-      'abc123def456\n',
-    );
-    expect(getGitHead(dir)).toBe('abc123def456');
+  it('getGitHead returns the HEAD commit hash for a real git repo', () => {
+    initGitRepo(dir);
+    const head = getGitHead(dir);
+    expect(head).not.toBeNull();
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+  });
+});
+
+// Helper: initialize a real git repo at `dir` with one commit. Required for
+// the new shell-based git helpers (the previous fs-based implementation
+// could fake .git contents; the shell version requires a real repo).
+function initGitRepo(dir: string): void {
+  const opts = { cwd: dir, encoding: 'utf-8' as const, windowsHide: true };
+  spawnSync('git', ['init', '-q', '-b', 'main'], opts);
+  spawnSync('git', ['config', 'user.email', 'test@nexus.local'], opts);
+  spawnSync('git', ['config', 'user.name', 'Nexus Test'], opts);
+  spawnSync('git', ['config', 'commit.gpgsign', 'false'], opts);
+  fs.writeFileSync(path.join(dir, 'README.md'), '# test\n');
+  spawnSync('git', ['add', 'README.md'], opts);
+  spawnSync('git', ['commit', '-q', '-m', 'init'], opts);
+}
+
+function gitOk(dir: string, args: string[]): void {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf-8', windowsHide: true });
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? r.stdout ?? ''}`);
+  }
+}
+
+// ── detectWorkspace ────────────────────────────────────────────────────
+
+describe('detectWorkspace', () => {
+  let dir: string;
+  beforeEach(() => { dir = tmpDir(); });
+  afterEach(() => { rmrf(dir); });
+
+  it('returns standalone for a dir with no markers', () => {
+    const deep = path.join(dir, 'a', 'b');
+    fs.mkdirSync(deep, { recursive: true });
+    const info = detectWorkspace(deep);
+    expect(info.mode).toBe('standalone');
+    expect(info.root).toBe(deep);
+  });
+
+  it('returns standalone rooted at .nexus.json marker', () => {
+    fs.writeFileSync(path.join(dir, '.nexus.json'), '{}');
+    const sub = path.join(dir, 'src');
+    fs.mkdirSync(sub, { recursive: true });
+    const info = detectWorkspace(sub);
+    expect(info.mode).toBe('standalone');
+    expect(info.root).toBe(dir);
+  });
+
+  it('returns main mode for a real git repo (.git is a directory)', () => {
+    initGitRepo(dir);
+    const info = detectWorkspace(dir);
+    expect(info.mode).toBe('main');
+    expect(info.root).toBe(dir);
+    if (info.mode === 'main') {
+      expect(info.gitDir).toBe(path.join(dir, '.git'));
+    }
+  });
+
+  it('prefers nearer .nexus.json over a parent .git (existing semantics)', () => {
+    initGitRepo(dir);
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(sub, '.nexus.json'), '{}');
+    const info = detectWorkspace(path.join(sub));
+    expect(info.mode).toBe('standalone');
+    expect(info.root).toBe(sub);
+  });
+
+  it('when both .git and .nexus.json exist at the same dir, .git wins', () => {
+    initGitRepo(dir);
+    fs.writeFileSync(path.join(dir, '.nexus.json'), '{}');
+    const info = detectWorkspace(dir);
+    expect(info.mode).toBe('main');
+  });
+
+  it('detects worktree mode and resolves parentRoot via gitdir/commondir', () => {
+    initGitRepo(dir);
+    // Create a worktree: git worktree add <wt> -b feature/test
+    const wt = path.join(dir, 'wt-test');
+    gitOk(dir, ['worktree', 'add', wt, '-b', 'feature/test']);
+
+    const info = detectWorkspace(wt);
+    expect(info.mode).toBe('worktree');
+    if (info.mode === 'worktree') {
+      // parentRoot should resolve back to the main checkout dir.
+      // Compare via realpath to handle Windows short/long path quirks.
+      expect(fs.realpathSync(info.parentRoot)).toBe(fs.realpathSync(dir));
+      expect(info.root).toBe(wt);
+      expect(info.sourceRoot).toBe(wt);
+      expect(info.baseIndexPath).toBe(path.join(info.parentRoot, '.nexus', 'index.db'));
+      expect(info.overlayPath).toBe(path.join(wt, '.nexus', 'overlay.db'));
+    }
+  });
+});
+
+// ── resolveRoot ────────────────────────────────────────────────────────
+
+describe('resolveRoot', () => {
+  let savedNexus: string | undefined;
+  let savedClaude: string | undefined;
+
+  beforeEach(() => {
+    savedNexus = process.env.NEXUS_ROOT;
+    savedClaude = process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.NEXUS_ROOT;
+    delete process.env.CLAUDE_PROJECT_DIR;
+  });
+  afterEach(() => {
+    if (savedNexus === undefined) delete process.env.NEXUS_ROOT;
+    else process.env.NEXUS_ROOT = savedNexus;
+    if (savedClaude === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = savedClaude;
+  });
+
+  it('--root arg wins highest priority', () => {
+    process.env.NEXUS_ROOT = '/env/nexus';
+    process.env.CLAUDE_PROJECT_DIR = '/env/claude';
+    const r = resolveRoot({ rootArg: '/from/arg', mcpRoots: ['/from/mcp'] });
+    expect(r.source).toBe('arg');
+    expect(r.startDir).toBe(path.resolve('/from/arg'));
+  });
+
+  it('NEXUS_ROOT beats CLAUDE_PROJECT_DIR and MCP roots', () => {
+    process.env.NEXUS_ROOT = '/env/nexus';
+    process.env.CLAUDE_PROJECT_DIR = '/env/claude';
+    const r = resolveRoot({ mcpRoots: ['/from/mcp'] });
+    expect(r.source).toBe('env-nexus');
+    expect(r.startDir).toBe(path.resolve('/env/nexus'));
+  });
+
+  it('CLAUDE_PROJECT_DIR beats MCP roots', () => {
+    process.env.CLAUDE_PROJECT_DIR = '/env/claude';
+    const r = resolveRoot({ mcpRoots: ['/from/mcp'] });
+    expect(r.source).toBe('env-claude');
+    expect(r.startDir).toBe(path.resolve('/env/claude'));
+  });
+
+  it('MCP roots beat cwd fallback', () => {
+    const r = resolveRoot({ mcpRoots: ['/from/mcp'] });
+    expect(r.source).toBe('mcp-roots');
+    expect(r.startDir).toBe(path.resolve('/from/mcp'));
+  });
+
+  it('falls back to process.cwd()', () => {
+    const r = resolveRoot();
+    expect(r.source).toBe('cwd');
+    expect(r.startDir).toBe(process.cwd());
+  });
+});
+
+// ── Worktree-safe git helpers ──────────────────────────────────────────
+
+describe('Worktree-safe git helpers', () => {
+  let dir: string;
+  beforeEach(() => { dir = tmpDir(); });
+  afterEach(() => { rmrf(dir); });
+
+  it('gitHead returns null when not a git repo', () => {
+    expect(gitHead(dir)).toBeNull();
+  });
+
+  it('gitHead works in a worktree (where .git is a file pointer)', () => {
+    initGitRepo(dir);
+    const mainHead = gitHead(dir);
+    expect(mainHead).toMatch(/^[0-9a-f]{40}$/);
+
+    const wt = path.join(dir, 'wt');
+    gitOk(dir, ['worktree', 'add', wt, '-b', 'wt-test']);
+    const wtHead = gitHead(wt);
+    expect(wtHead).toMatch(/^[0-9a-f]{40}$/);
+    // Same commit since the new branch was just created from HEAD.
+    expect(wtHead).toBe(mainHead);
+  });
+
+  it('gitStatusClean returns true for an untouched repo', () => {
+    initGitRepo(dir);
+    expect(gitStatusClean(dir, { ignorePaths: ['.nexus/'] })).toBe(true);
+  });
+
+  it('gitStatusClean returns false for staged config changes (.nexus.json counts)', () => {
+    initGitRepo(dir);
+    fs.writeFileSync(path.join(dir, '.nexus.json'), '{}');
+    gitOk(dir, ['add', '.nexus.json']);
+    expect(gitStatusClean(dir, { ignorePaths: ['.nexus/'] })).toBe(false);
+  });
+
+  it('gitStatusClean ignores .nexus/ artifacts', () => {
+    initGitRepo(dir);
+    fs.mkdirSync(path.join(dir, '.nexus'));
+    fs.writeFileSync(path.join(dir, '.nexus', 'index.db'), 'fake');
+    expect(gitStatusClean(dir, { ignorePaths: ['.nexus/'] })).toBe(true);
+  });
+
+  it('gitDiffUnstaged catches an unstaged edit', () => {
+    initGitRepo(dir);
+    fs.writeFileSync(path.join(dir, 'src.ts'), 'export const x = 1;\n');
+    gitOk(dir, ['add', 'src.ts']);
+    gitOk(dir, ['commit', '-q', '-m', 'add src']);
+
+    fs.writeFileSync(path.join(dir, 'src.ts'), 'export const x = 2;\n');
+    const changes = gitDiffUnstaged(dir);
+    expect(changes).toEqual([{ status: 'M', path: 'src.ts' }]);
+  });
+
+  it('gitDiffStaged catches a staged add', () => {
+    initGitRepo(dir);
+    fs.writeFileSync(path.join(dir, 'new.ts'), 'export {};\n');
+    gitOk(dir, ['add', 'new.ts']);
+    const changes = gitDiffStaged(dir);
+    expect(changes).toEqual([{ status: 'A', path: 'new.ts' }]);
+  });
+
+  it('gitLsFilesUntracked lists untracked files', () => {
+    initGitRepo(dir);
+    fs.writeFileSync(path.join(dir, 'untracked.ts'), 'x\n');
+    expect(gitLsFilesUntracked(dir)).toEqual(['untracked.ts']);
+  });
+
+  it('gitMergeBaseIsAncestor returns true for HEAD ancestor', () => {
+    initGitRepo(dir);
+    const head1 = gitHead(dir)!;
+    fs.writeFileSync(path.join(dir, 'b.ts'), 'export const b = 1;\n');
+    gitOk(dir, ['add', 'b.ts']);
+    gitOk(dir, ['commit', '-q', '-m', 'add b']);
+    const head2 = gitHead(dir)!;
+    expect(head1).not.toBe(head2);
+    expect(gitMergeBaseIsAncestor(dir, head1, head2)).toBe(true);
+    expect(gitMergeBaseIsAncestor(dir, head2, head1)).toBe(false);
+  });
+
+  it('gitDiffNameStatus computes committed changes between base and HEAD', () => {
+    initGitRepo(dir);
+    const base = gitHead(dir)!;
+    fs.writeFileSync(path.join(dir, 'a.ts'), 'a\n');
+    gitOk(dir, ['add', 'a.ts']);
+    gitOk(dir, ['commit', '-q', '-m', 'a']);
+    fs.writeFileSync(path.join(dir, 'README.md'), '# test\nupdated\n');
+    gitOk(dir, ['add', 'README.md']);
+    gitOk(dir, ['commit', '-q', '-m', 'update README']);
+
+    const changes = gitDiffNameStatus(dir, base);
+    const sorted = [...changes].sort((x, y) => x.path.localeCompare(y.path));
+    expect(sorted).toEqual([
+      { status: 'A', path: 'a.ts' },
+      { status: 'M', path: 'README.md' },
+    ]);
   });
 });
 

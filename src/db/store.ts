@@ -96,7 +96,145 @@ export interface TreeDataRow {
 // ── Store ──────────────────────────────────────────────────────────────
 
 export class NexusStore {
+  private overlayAttached = false;
+
   constructor(private db: Database.Database) {}
+
+  // ── Overlay attach/detach ──────────────────────────────────────────
+
+  /**
+   * Attach an overlay database (read-only) and create TEMP VIEWS named
+   * `files`/`symbols`/`module_edges`/`occurrences`/`meta`/`index_runs` that
+   * shadow the parent tables with merged content. Parent ids stay positive,
+   * overlay ids become negative; cross-file FKs are redirected via path_key
+   * joins against `overlay.files` and `overlay.deleted_files`.
+   *
+   * The parent `db` should be opened read-only; the overlay is attached as a
+   * URI with `mode=ro`. After this call, every existing query that selects
+   * from the unqualified table names automatically sees merged data — direct
+   * SQL like `engine.ts:SELECT * FROM symbols` works without rewriting.
+   */
+  attachOverlay(overlayPath: string): void {
+    if (this.overlayAttached) return;
+
+    // Plain-path ATTACH. better-sqlite3 doesn't enable URI parsing by default,
+    // so we can't use `file:...?mode=ro` to enforce read-only at the SQLite
+    // level. Defense-in-depth: query code never writes to overlay tables, and
+    // the rebuild flow closes this connection before the writer touches the
+    // file (see mcp.ts ensureFresh).
+    //
+    // Path quoting: SQL string literals double-up single quotes. Windows paths
+    // contain backslashes which SQLite treats literally — no escaping needed
+    // beyond the single-quote pass.
+    const safe = overlayPath.replace(/'/g, "''");
+    this.db.exec(`ATTACH DATABASE '${safe}' AS overlay`);
+
+    this.db.exec(`
+      CREATE TEMP TABLE overlay_path_index AS
+        SELECT path, path_key, id AS overlay_file_id FROM overlay.files;
+      CREATE INDEX overlay_pi_pk ON overlay_path_index(path_key);
+
+      CREATE TEMP TABLE changed_or_deleted (path TEXT, path_key TEXT PRIMARY KEY);
+      INSERT INTO changed_or_deleted SELECT path, path_key FROM overlay.files;
+      INSERT OR IGNORE INTO changed_or_deleted SELECT path, path_key FROM overlay.deleted_files;
+
+      DROP VIEW IF EXISTS temp.files;
+      CREATE TEMP VIEW files AS
+        SELECT id, path, path_key, hash, mtime, size, language, status, error, indexed_at
+          FROM main.files
+         WHERE path_key NOT IN (SELECT path_key FROM changed_or_deleted)
+        UNION ALL
+        SELECT -id, path, path_key, hash, mtime, size, language, status, error, indexed_at
+          FROM overlay.files;
+
+      DROP VIEW IF EXISTS temp.symbols;
+      CREATE TEMP VIEW symbols AS
+        SELECT s.id, s.file_id, s.name, s.kind, s.line, s.col, s.end_line, s.signature, s.scope, s.doc
+          FROM main.symbols s
+          JOIN main.files f ON f.id = s.file_id
+         WHERE f.path_key NOT IN (SELECT path_key FROM changed_or_deleted)
+        UNION ALL
+        SELECT -id, -file_id, name, kind, line, col, end_line, signature, scope, doc
+          FROM overlay.symbols;
+
+      DROP VIEW IF EXISTS temp.occurrences;
+      CREATE TEMP VIEW occurrences AS
+        SELECT o.id, o.file_id, o.name, o.line, o.col, o.context, o.confidence, o.ref_kind
+          FROM main.occurrences o
+          JOIN main.files f ON f.id = o.file_id
+         WHERE f.path_key NOT IN (SELECT path_key FROM changed_or_deleted)
+        UNION ALL
+        SELECT -id, -file_id, name, line, col, context, confidence, ref_kind
+          FROM overlay.occurrences;
+
+      DROP VIEW IF EXISTS temp.module_edges;
+      CREATE TEMP VIEW module_edges AS
+        SELECT m.id, m.file_id, m.kind, m.name, m.alias, m.source, m.line,
+               m.is_default, m.is_star, m.is_type, m.symbol_id,
+               CASE
+                 WHEN m.resolved_file_id IS NULL THEN NULL
+                 WHEN tgt.path_key IN (SELECT path_key FROM overlay.deleted_files) THEN NULL
+                 WHEN tgt.path_key IN (SELECT path_key FROM overlay_path_index) THEN
+                   (SELECT -opi.overlay_file_id FROM overlay_path_index opi
+                     WHERE opi.path_key = tgt.path_key)
+                 ELSE m.resolved_file_id
+               END AS resolved_file_id
+          FROM main.module_edges m
+          JOIN main.files src ON src.id = m.file_id
+          LEFT JOIN main.files tgt ON tgt.id = m.resolved_file_id
+         WHERE src.path_key NOT IN (SELECT path_key FROM changed_or_deleted)
+        UNION ALL
+        SELECT -m.id, -m.file_id, m.kind, m.name, m.alias, m.source, m.line,
+               m.is_default, m.is_star, m.is_type,
+               CASE WHEN m.symbol_id IS NULL THEN NULL ELSE -m.symbol_id END,
+               CASE
+                 WHEN m.resolved_path_key IS NULL THEN NULL
+                 WHEN m.resolved_path_key IN (SELECT path_key FROM overlay_path_index) THEN
+                   (SELECT -opi.overlay_file_id FROM overlay_path_index opi
+                     WHERE opi.path_key = m.resolved_path_key)
+                 WHEN m.resolved_path_key IN (SELECT path_key FROM overlay.deleted_files) THEN NULL
+                 ELSE (SELECT id FROM main.files WHERE path_key = m.resolved_path_key)
+               END AS resolved_file_id
+          FROM overlay.module_edges m;
+
+      DROP VIEW IF EXISTS temp.meta;
+      CREATE TEMP VIEW meta AS
+        SELECT key, value FROM main.meta
+         WHERE key NOT IN ('git_head', 'root_path', 'index_mode', 'last_indexed_at')
+        UNION ALL
+        SELECT key, value FROM overlay.meta
+         WHERE key IN ('git_head', 'root_path', 'index_mode', 'last_indexed_at',
+                       'parent_git_head', 'parent_index_path', 'built_at', 'degraded_reason');
+
+      DROP VIEW IF EXISTS temp.index_runs;
+      CREATE TEMP VIEW index_runs AS
+        SELECT * FROM overlay.index_runs;
+    `);
+    this.overlayAttached = true;
+  }
+
+  detachOverlay(): void {
+    if (!this.overlayAttached) return;
+    try {
+      this.db.exec(`
+        DROP VIEW IF EXISTS temp.index_runs;
+        DROP VIEW IF EXISTS temp.meta;
+        DROP VIEW IF EXISTS temp.module_edges;
+        DROP VIEW IF EXISTS temp.occurrences;
+        DROP VIEW IF EXISTS temp.symbols;
+        DROP VIEW IF EXISTS temp.files;
+        DROP TABLE IF EXISTS temp.changed_or_deleted;
+        DROP TABLE IF EXISTS temp.overlay_path_index;
+      `);
+      this.db.exec(`DETACH DATABASE overlay`);
+    } finally {
+      this.overlayAttached = false;
+    }
+  }
+
+  hasOverlayAttached(): boolean {
+    return this.overlayAttached;
+  }
 
   // ── Meta ────────────────────────────────────────────────────────────
 
