@@ -1,3 +1,5 @@
+import type Database from 'better-sqlite3';
+
 /**
  * Event shape mirrors Claude Code's PreToolUse hook JSON payload.
  * Only the fields we actually consume are typed; extra fields are tolerated.
@@ -107,6 +109,10 @@ export interface PolicyContext {
   /** Optional DB-backed query engine. Rules that need DB access must
    *  fall open (return null) when this is undefined. */
   queryEngine?: QueryEngineLike;
+  /** Telemetry handle (D5). Forwarded by the dispatcher; rules ignore it. */
+  telemetryDb?: Database.Database;
+  /** Canonical hash of `tool_input` (D5). Undefined when telemetry disabled. */
+  inputHash?: string;
 }
 
 export interface PolicyRule {
