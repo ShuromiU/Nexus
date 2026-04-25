@@ -92,9 +92,55 @@ describe('policy types', () => {
       importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
       outline: () => ({ results: [{ file: 'src/b.ts', exports: [], outline: [] }] }),
       callers: (_name, _opts) => ({ results: [{ callers: [] }] }),
+      unusedExports: () => ({ results: [] }),
     };
     expect(engine.importers('src/b.ts').count).toBe(1);
     expect(engine.outline('src/b.ts').results.length).toBe(1);
     expect(engine.callers('foo', { file: 'src/b.ts', limit: 50 }).results[0].callers.length).toBe(0);
+  });
+
+  it('PolicyEvent accepts an optional tool_response', () => {
+    const event: PolicyEvent = {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'npm test' },
+      tool_response: { exit_code: 0, stdout: '', stderr: '' },
+      session_id: 's1',
+    };
+    expect(event.tool_response?.exit_code).toBe(0);
+  });
+
+  it('QueryEngineLike exposes unusedExports', () => {
+    const engine: QueryEngineLike = {
+      importers: () => ({ results: [], count: 0 }),
+      outline: () => ({ results: [] }),
+      callers: () => ({ results: [{ callers: [] }] }),
+      unusedExports: () => ({
+        results: [{ name: 'foo', file: 'src/a.ts', kind: 'function', line: 1 }],
+      }),
+    };
+    expect(engine.unusedExports().results[0].name).toBe('foo');
+    expect(
+      engine.unusedExports({ path: 'src/a.ts', limit: 5, mode: 'default' }).results.length,
+    ).toBe(1);
+  });
+
+  it('QueryEngineLike.callers exposes the richer call_sites shape', () => {
+    const engine: QueryEngineLike = {
+      importers: () => ({ results: [], count: 0 }),
+      outline: () => ({ results: [] }),
+      callers: () => ({
+        results: [{
+          callers: [{
+            caller: { file: 'src/x.ts', line: 10 },
+            call_sites: [{ line: 12, col: 4 }],
+          }],
+        }],
+      }),
+      unusedExports: () => ({ results: [] }),
+    };
+    const c = engine.callers('foo').results[0].callers[0];
+    expect(c.caller?.file).toBe('src/x.ts');
+    expect(c.call_sites?.[0].line).toBe(12);
   });
 });
