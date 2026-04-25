@@ -75,3 +75,60 @@ describe('openTelemetryDb', () => {
     closeTelemetryDb(db!);
   });
 });
+
+describe('recordEvent', () => {
+  it('is a no-op when db is null', () => {
+    expect(() => recordEvent(null, {
+      ts_ms: 1, session_id: 's', hook_event: 'PreToolUse',
+      tool_name: 'Read', rule: 'r', decision: 'allow', latency_us: 100,
+      input_hash: 'a'.repeat(16), file_path: 'f.ts', payload_json: null,
+    })).not.toThrow();
+  });
+
+  it('inserts a row matching the input', () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    recordEvent(db, {
+      ts_ms: 12345, session_id: 'sess1', hook_event: 'PreToolUse',
+      tool_name: 'Edit', rule: 'preedit-impact', decision: 'allow',
+      latency_us: 850, input_hash: '1234567890abcdef',
+      file_path: 'src/foo.ts', payload_json: null,
+    });
+    const row = db.prepare('SELECT * FROM events').get() as Record<string, unknown>;
+    expect(row.ts_ms).toBe(12345);
+    expect(row.session_id).toBe('sess1');
+    expect(row.hook_event).toBe('PreToolUse');
+    expect(row.tool_name).toBe('Edit');
+    expect(row.rule).toBe('preedit-impact');
+    expect(row.decision).toBe('allow');
+    expect(row.latency_us).toBe(850);
+    expect(row.input_hash).toBe('1234567890abcdef');
+    expect(row.file_path).toBe('src/foo.ts');
+    expect(row.payload_json).toBeNull();
+    closeTelemetryDb(db);
+  });
+
+  it('swallows errors when DB is closed mid-record', () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    closeTelemetryDb(db);
+    expect(() => recordEvent(db, {
+      ts_ms: 1, session_id: null, hook_event: 'PreToolUse',
+      tool_name: 'Read', rule: null, decision: 'noop', latency_us: 0,
+      input_hash: null, file_path: null, payload_json: null,
+    })).not.toThrow();
+  });
+
+  it('accepts NULL session_id, rule, decision, and latency_us', () => {
+    const db = openTelemetryDb(tmpRoot)!;
+    recordEvent(db, {
+      ts_ms: 1, session_id: null, hook_event: 'opt_out',
+      tool_name: null, rule: null, decision: null, latency_us: null,
+      input_hash: null, file_path: null, payload_json: null,
+    });
+    const row = db.prepare('SELECT * FROM events').get() as Record<string, unknown>;
+    expect(row.hook_event).toBe('opt_out');
+    expect(row.session_id).toBeNull();
+    expect(row.rule).toBeNull();
+    expect(row.latency_us).toBeNull();
+    closeTelemetryDb(db);
+  });
+});

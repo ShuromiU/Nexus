@@ -91,8 +91,31 @@ export function closeTelemetryDb(db: Database.Database): void {
   try { db.close(); } catch { /* swallow */ }
 }
 
-export function recordEvent(_db: Database.Database | null, _ev: TelemetryEvent): void {
-  // implemented in Task 3
+const INSERT_SQL = `
+INSERT INTO events
+  (ts_ms, session_id, hook_event, tool_name, rule, decision,
+   latency_us, input_hash, file_path, payload_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+export function recordEvent(db: Database.Database | null, ev: TelemetryEvent): void {
+  if (!db) return;
+  try {
+    db.prepare(INSERT_SQL).run(
+      ev.ts_ms,
+      ev.session_id,
+      ev.hook_event,
+      ev.tool_name,
+      ev.rule,
+      ev.decision,
+      ev.latency_us,
+      ev.input_hash,
+      ev.file_path,
+      ev.payload_json,
+    );
+  } catch {
+    /* swallow — telemetry must never block policy */
+  }
 }
 
 export function pruneIfDue(_db: Database.Database, _now?: number): { pruned: number } {
