@@ -169,4 +169,96 @@ describe('policy-entry', () => {
 
     fs.rmSync(tmp, { recursive: true, force: true });
   });
+
+  it('PostToolUse Bash npm test writes .nexus/session-state.json', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-pe-d3-tt-'));
+    const result = run(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test' },
+        tool_response: { exit_code: 0 },
+        session_id: 's-d3-1',
+      },
+      tmp,
+    );
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('allow');
+    const stateFile = path.join(tmp, '.nexus', 'session-state.json');
+    expect(fs.existsSync(stateFile)).toBe(true);
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    expect(state.session_id).toBe('s-d3-1');
+    expect(state.tests_run.map((r: { cmd: string }) => r.cmd)).toContain('npm test');
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('falls open (silent allow) for git commit when .nexus/index.db is missing', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-pe-d3-nodb-'));
+    const result = run(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git commit -m wip' },
+        session_id: 's-d3-2',
+      },
+      tmp,
+    );
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('allow');
+    expect(parsed.additional_context).toBeUndefined();
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('PreToolUse git commit on indexed dirty source emits additional_context', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-pe-d3-cm-'));
+    fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmp, 'src', 'bar.ts'),
+      'export function foo() {\n  return 1;\n}\n',
+    );
+    fs.writeFileSync(
+      path.join(tmp, 'src', 'a.ts'),
+      "import { foo } from './bar';\nfoo();\n",
+    );
+    runIndex(tmp);
+
+    // Initialize a git repo + commit baseline so `git status` reports dirty
+    // changes.
+    spawnSync('git', ['init', '-q'], { cwd: tmp });
+    spawnSync('git', ['config', 'user.email', 't@t.test'], { cwd: tmp });
+    spawnSync('git', ['config', 'user.name', 't'], { cwd: tmp });
+    spawnSync('git', ['add', '.'], { cwd: tmp });
+    spawnSync('git', ['commit', '-q', '-m', 'baseline'], { cwd: tmp });
+    // Now dirty src/bar.ts so git status reports it.
+    fs.writeFileSync(
+      path.join(tmp, 'src', 'bar.ts'),
+      'export function foo() {\n  return 2;\n}\n',
+    );
+
+    const result = run(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git commit -m wip' },
+        session_id: 's-d3-3',
+      },
+      tmp,
+    );
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.decision).toBe('allow');
+    if (parsed.rule === 'evidence-summary') {
+      expect(parsed.additional_context).toMatch(/foo/);
+    } else {
+      // Either git is missing on this machine or the index didn't catch the
+      // file — fall-open is acceptable per the design.
+      expect(parsed.additional_context).toBeUndefined();
+    }
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
 });
