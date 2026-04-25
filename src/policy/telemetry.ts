@@ -146,3 +146,42 @@ export function pruneIfDue(db: Database.Database, now: number = Date.now()): { p
     return { pruned: 0 };
   }
 }
+
+export function recordOptOutTransition(rootDir: string, currentlyEnabled: boolean): void {
+  const db = openTelemetryDb(rootDir);
+  if (!db) return;
+  try {
+    const row = db.prepare('SELECT value FROM meta WHERE key=?').get('last_enabled_state') as { value: string } | undefined;
+    const last = row?.value ?? null;
+    const now = currentlyEnabled ? '1' : '0';
+
+    if (last === null) {
+      db.prepare(
+        "INSERT INTO meta(key, value) VALUES('last_enabled_state', ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+      ).run(now);
+    } else if (last !== now) {
+      const hookEvent = currentlyEnabled ? 'opt_in' : 'opt_out';
+      recordEvent(db, {
+        ts_ms: Date.now(),
+        session_id: null,
+        hook_event: hookEvent,
+        tool_name: null,
+        rule: null,
+        decision: null,
+        latency_us: null,
+        input_hash: null,
+        file_path: null,
+        payload_json: null,
+      });
+      db.prepare(
+        "INSERT INTO meta(key, value) VALUES('last_enabled_state', ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+      ).run(now);
+    }
+  } catch {
+    /* swallow */
+  } finally {
+    closeTelemetryDb(db);
+  }
+}
