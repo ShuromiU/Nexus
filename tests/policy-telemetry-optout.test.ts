@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import Database from 'better-sqlite3';
 import { recordOptOutTransition } from '../src/policy/telemetry.js';
+import { isTelemetryEnabled } from '../src/policy/telemetry-config.js';
 
 let tmpRoot: string;
 beforeEach(() => {
@@ -62,5 +63,70 @@ describe('recordOptOutTransition', () => {
     const fakeRoot = path.join(tmpRoot, 'parent-is-file');
     fs.writeFileSync(fakeRoot, 'sentinel');
     expect(() => recordOptOutTransition(fakeRoot, false)).not.toThrow();
+  });
+});
+
+describe('isTelemetryEnabled', () => {
+  let savedEnv: string | undefined;
+  beforeEach(() => {
+    savedEnv = process.env.NEXUS_TELEMETRY;
+    delete process.env.NEXUS_TELEMETRY;
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.NEXUS_TELEMETRY;
+    else process.env.NEXUS_TELEMETRY = savedEnv;
+  });
+
+  function writeConfig(value: unknown): void {
+    fs.writeFileSync(path.join(tmpRoot, '.nexus.json'), JSON.stringify({ telemetry: value }));
+  }
+
+  it('default is enabled (no env, no config)', () => {
+    expect(isTelemetryEnabled(tmpRoot)).toBe(true);
+  });
+
+  it('config telemetry:false disables', () => {
+    writeConfig(false);
+    expect(isTelemetryEnabled(tmpRoot)).toBe(false);
+  });
+
+  it('config telemetry:true enables (explicit)', () => {
+    writeConfig(true);
+    expect(isTelemetryEnabled(tmpRoot)).toBe(true);
+  });
+
+  it('env=0 overrides config=true', () => {
+    writeConfig(true);
+    process.env.NEXUS_TELEMETRY = '0';
+    expect(isTelemetryEnabled(tmpRoot)).toBe(false);
+  });
+
+  it('env=1 overrides config=false', () => {
+    writeConfig(false);
+    process.env.NEXUS_TELEMETRY = '1';
+    expect(isTelemetryEnabled(tmpRoot)).toBe(true);
+  });
+
+  it('env=false (string) treated as disabled', () => {
+    process.env.NEXUS_TELEMETRY = 'false';
+    expect(isTelemetryEnabled(tmpRoot)).toBe(false);
+  });
+
+  it('env=true (string) treated as enabled', () => {
+    writeConfig(false);
+    process.env.NEXUS_TELEMETRY = 'true';
+    expect(isTelemetryEnabled(tmpRoot)).toBe(true);
+  });
+
+  it('malformed config falls back to enabled', () => {
+    fs.writeFileSync(path.join(tmpRoot, '.nexus.json'), '{not-json');
+    expect(isTelemetryEnabled(tmpRoot)).toBe(true);
+  });
+
+  it('unknown env value (e.g. "yes") falls through to config/default', () => {
+    process.env.NEXUS_TELEMETRY = 'yes';
+    expect(isTelemetryEnabled(tmpRoot)).toBe(true);
+    writeConfig(false);
+    expect(isTelemetryEnabled(tmpRoot)).toBe(false);
   });
 });

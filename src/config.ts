@@ -9,6 +9,7 @@ export interface NexusConfig {
   languages: Record<string, { extensions: string[] }>;
   maxFileSize: number;
   minifiedLineLength: number;
+  telemetry?: boolean;
 }
 
 const DEFAULT_CONFIG: NexusConfig = {
@@ -38,6 +39,7 @@ export function loadConfig(rootDir: string): NexusConfig {
       languages: parsed.languages ?? DEFAULT_CONFIG.languages,
       maxFileSize: parsed.maxFileSize ?? DEFAULT_CONFIG.maxFileSize,
       minifiedLineLength: parsed.minifiedLineLength ?? DEFAULT_CONFIG.minifiedLineLength,
+      ...(typeof parsed.telemetry === 'boolean' ? { telemetry: parsed.telemetry } : {}),
     };
   } catch {
     // No config file or invalid JSON — use all defaults
