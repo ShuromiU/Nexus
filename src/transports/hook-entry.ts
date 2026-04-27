@@ -15,7 +15,7 @@
  * Always exits 0 unless something truly unrecoverable happens.
  */
 
-import { runPolicyHook, readStdinSync } from '../policy/dispatch-hook.js';
+import { computePolicyResponse, formatHookEnvelope, readStdinSync } from '../policy/dispatch-hook.js';
 import { resolveRoot } from '../workspace/detector.js';
 
 async function runSessionStart(): Promise<void> {
@@ -49,8 +49,10 @@ async function main(): Promise<void> {
     case 'pre':
     case 'post': {
       const raw = readStdinSync();
-      const response = await runPolicyHook(raw);
-      process.stdout.write(response);
+      const response = await computePolicyResponse(raw);
+      const eventName = sub === 'pre' ? 'PreToolUse' : 'PostToolUse';
+      const envelope = formatHookEnvelope(response, eventName);
+      if (envelope) process.stdout.write(envelope);
       return;
     }
     case 'session-start':

@@ -79,21 +79,70 @@ async function tryOpenEngineLazy(rootDir: string): Promise<QueryEngineLike | und
 }
 
 /**
- * Drive a Pre/Post tool-use policy dispatch from a raw stdin payload, returning
- * the JSON response body to write to stdout. Always returns a valid response —
- * malformed input becomes `decision: allow` so the hook never blocks the user
- * accidentally.
+ * Translate a `PolicyResponse` into the Claude Code hook envelope shape
+ * (`{ hookSpecificOutput: { hookEventName, permissionDecision?, permissionDecisionReason?, additionalContext? } }`).
+ *
+ * Returns an empty string when the response has nothing actionable for Claude
+ * Code (e.g. plain `allow` with no `additional_context`). Callers SHOULD skip
+ * writing to stdout when this returns `''` — Claude Code treats no output as
+ * "no opinion / proceed."
+ *
+ * `nexus-policy-check` keeps emitting the flat `PolicyResponse` shape for the
+ * legacy bash wrapper that wraps it via `jq`. This helper exists for the new
+ * `nexus-hook` bin, which is invoked DIRECTLY by Claude Code with no wrapper.
  */
-export async function runPolicyHook(rawStdin: string): Promise<string> {
+export function formatHookEnvelope(
+  response: PolicyResponse,
+  hookEventName: 'PreToolUse' | 'PostToolUse',
+): string {
+  if (hookEventName === 'PreToolUse') {
+    if (response.decision === 'deny' || response.decision === 'ask') {
+      return JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName,
+          permissionDecision: response.decision,
+          permissionDecisionReason: response.reason ?? '',
+        },
+      });
+    }
+    if (response.decision === 'allow' && response.additional_context) {
+      return JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName,
+          permissionDecision: 'allow',
+          additionalContext: response.additional_context,
+        },
+      });
+    }
+    return '';
+  }
+
+  if (response.additional_context) {
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName,
+        additionalContext: response.additional_context,
+      },
+    });
+  }
+  return '';
+}
+
+/**
+ * Compute the bare `PolicyResponse` for a hook payload. Used by both
+ * `runPolicyHook` (which stringifies it for the legacy bash wrapper) and
+ * `nexus-hook`, which wraps it into the Claude Code `hookSpecificOutput`
+ * envelope via `formatHookEnvelope`.
+ */
+export async function computePolicyResponse(rawStdin: string): Promise<PolicyResponse> {
   const event = parseEvent(rawStdin);
   if (!event) {
-    const response: PolicyResponse = {
+    return {
       decision: 'allow',
       rule: 'parse-error',
       reason: 'malformed hook payload',
       stale_hint: false,
     };
-    return JSON.stringify(response);
   }
 
   const cwd = event.cwd ?? resolveRoot().startDir;
@@ -119,15 +168,25 @@ export async function runPolicyHook(rawStdin: string): Promise<string> {
   const queryEngine = await tryOpenEngineLazy(rootDir);
 
   try {
-    const response = dispatchPolicy(event, {
+    return dispatchPolicy(event, {
       rootDir,
       rules: DEFAULT_RULES,
       ...(queryEngine ? { queryEngine } : {}),
       ...(telemetryDb ? { telemetryDb } : {}),
       inputHash,
     });
-    return JSON.stringify(response);
   } finally {
     if (telemetryDb) closeTelemetryDb(telemetryDb);
   }
+}
+
+/**
+ * Drive a Pre/Post tool-use policy dispatch from a raw stdin payload, returning
+ * the JSON response body to write to stdout. Always returns a valid response —
+ * malformed input becomes `decision: allow` so the hook never blocks the user
+ * accidentally.
+ */
+export async function runPolicyHook(rawStdin: string): Promise<string> {
+  const response = await computePolicyResponse(rawStdin);
+  return JSON.stringify(response);
 }
