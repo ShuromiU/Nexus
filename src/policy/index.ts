@@ -17,6 +17,7 @@ export { readOnSourceRule } from './rules/read-on-source.js';
 export { preeditImpactRule } from './rules/preedit-impact.js';
 export { evidenceSummaryRule, buildEvidenceRule } from './rules/evidence-summary.js';
 export { testTrackerRule } from './rules/test-tracker.js';
+export { agentDisciplineRule } from './rules/agent-discipline.js';
 
 import { grepOnCodeRule } from './rules/grep-on-code.js';
 import { readOnStructuredRule } from './rules/read-on-structured.js';
@@ -24,6 +25,7 @@ import { readOnSourceRule } from './rules/read-on-source.js';
 import { preeditImpactRule } from './rules/preedit-impact.js';
 import { evidenceSummaryRule } from './rules/evidence-summary.js';
 import { testTrackerRule } from './rules/test-tracker.js';
+import { agentDisciplineRule } from './rules/agent-discipline.js';
 import type { PolicyRule } from './types.js';
 
 /**
@@ -39,6 +41,7 @@ import type { PolicyRule } from './types.js';
  */
 export const DEFAULT_RULES: readonly PolicyRule[] = [
   grepOnCodeRule,
+  agentDisciplineRule,
   readOnStructuredRule,
   readOnSourceRule,
   preeditImpactRule,
