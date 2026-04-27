@@ -92,9 +92,12 @@ describe('nexus doctor', () => {
     const r = buildDoctorReport();
     expect(r.workspace.fs_mode).toBe('worktree');
     if (r.workspace.fs_mode === 'worktree') {
-      expect(fs.realpathSync(r.workspace.parentRoot!)).toBe(fs.realpathSync(dir));
+      // Use realpath.native — git canonicalizes commondir to long-form on
+      // Windows, while os.tmpdir() (and thus `dir`) may return 8.3 short names.
+      const realDir = fs.realpathSync.native(dir);
+      expect(fs.realpathSync.native(r.workspace.parentRoot!)).toBe(realDir);
       expect(r.workspace.overlayPath).toBe(path.join(wt, '.nexus', 'overlay.db'));
-      expect(r.workspace.baseIndexPath).toBe(path.join(dir, '.nexus', 'index.db'));
+      expect(r.workspace.baseIndexPath).toBe(path.join(realDir, '.nexus', 'index.db'));
     }
     expect(r.overlay).not.toBeNull();
     expect(r.overlay!.exists).toBe(false);

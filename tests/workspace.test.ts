@@ -244,8 +244,10 @@ describe('detectWorkspace', () => {
     expect(info.mode).toBe('worktree');
     if (info.mode === 'worktree') {
       // parentRoot should resolve back to the main checkout dir.
-      // Compare via realpath to handle Windows short/long path quirks.
-      expect(fs.realpathSync(info.parentRoot)).toBe(fs.realpathSync(dir));
+      // Use realpathSync.native — git canonicalizes commondir to the long form
+      // on Windows, so the plain realpathSync (which preserves 8.3 short names)
+      // would mismatch when os.tmpdir() returns a short-form path.
+      expect(fs.realpathSync.native(info.parentRoot)).toBe(fs.realpathSync.native(dir));
       expect(info.root).toBe(wt);
       expect(info.sourceRoot).toBe(wt);
       expect(info.baseIndexPath).toBe(path.join(info.parentRoot, '.nexus', 'index.db'));
