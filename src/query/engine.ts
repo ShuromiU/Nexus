@@ -47,6 +47,7 @@ export type NexusResultType =
   | 'lockfile_deps'
   | 'relations'
   | 'rename_safety'
+  | 'clarify'
   | 'policy_check';
 
 export interface NexusResult<T> {
@@ -420,6 +421,33 @@ export function classifyRenameRisk(input: RenameRiskInputs): {
 
   if (risk === 'low') reasons.push('no_external_refs');
   return { risk, reasons };
+}
+
+// ── Clarify (D2) ──────────────────────────────────────────────────────
+
+export interface ClarifyCandidate {
+  file: string;
+  line: number;
+  kind: string;
+  scope?: string;
+  signature?: string;
+  language: string;
+  is_export: boolean;
+  importer_count: number;
+  relation_summary?: string;
+}
+
+export interface ClarifyResult {
+  name: string;
+  candidates: ClarifyCandidate[];
+  count: number;
+  unique_disambiguators: {
+    files: string[];
+    kinds: string[];
+    scopes: string[];
+  };
+  /** Heuristic picks ranked by usage + structural prominence. */
+  suggested_picks: { rationale: string; index: number }[];
 }
 
 export interface RenameSafetyResult {
@@ -1849,6 +1877,119 @@ export class QueryEngine {
       reasons,
     };
     return this.wrap('rename_safety', queryText, [result], start);
+  }
+
+  /**
+   * Clarify (D2 v1) — given a name with multiple definitions, return every
+   * candidate plus the disambiguators an agent needs to pick precisely
+   * (file/kind/scope/signature/exported/importer count/relation summary).
+   *
+   * Ranking heuristic for `suggested_picks`:
+   *   1. Highest importer_count → "most-used".
+   *   2. Has children edges (extends/implements) → "base type for the hierarchy".
+   *   3. Alphabetic file path tie-breaker for determinism.
+   */
+  clarify(name: string): NexusResult<ClarifyResult> {
+    const start = performance.now();
+    const queryText = `clarify ${name}`;
+
+    const rows = this.store.getSymbolsWithFile(name);
+    const candidates: ClarifyCandidate[] = rows.map(row => {
+      // Importer count: number of distinct files that import row's file
+      // and reference this name (or star-import). Cheap heuristic for "popularity".
+      let importerCount = 0;
+      try {
+        const importers = this.store.getImportersByResolvedFileId(row.file_id);
+        const seen = new Set<string>();
+        for (const e of importers) {
+          if (e.is_star || e.name === name || e.alias === name) seen.add(e.file_path);
+        }
+        importerCount = seen.size;
+      } catch { /* best-effort */ }
+
+      // Relation summary: parent + child edge counts (only for class/interface).
+      let relationSummary: string | undefined;
+      if (row.kind === 'class' || row.kind === 'interface') {
+        try {
+          const children = this.store.getRelationsByTarget(name);
+          const parents = this.store.getRelationsBySource(name);
+          // Filter children to those whose target file matches this row.
+          const childCount = children.filter(c =>
+            c.target_file === row.file_path || c.target_file === undefined
+          ).length;
+          const parentCount = parents.filter(p => p.source_file === row.file_path).length;
+          const parts: string[] = [];
+          if (parentCount > 0) parts.push(`extends/implements ${parentCount}`);
+          if (childCount > 0) parts.push(`${childCount} child${childCount === 1 ? '' : 'ren'}`);
+          if (parts.length > 0) relationSummary = parts.join(', ');
+        } catch { /* best-effort */ }
+      }
+
+      return {
+        file: row.file_path,
+        line: row.line,
+        kind: row.kind,
+        ...(row.scope ? { scope: row.scope } : {}),
+        ...(row.signature ? { signature: row.signature } : {}),
+        language: row.file_language,
+        is_export: this.isExportedSymbol(row.file_id, name),
+        importer_count: importerCount,
+        ...(relationSummary ? { relation_summary: relationSummary } : {}),
+      };
+    });
+
+    // Build suggested_picks with deterministic ordering.
+    const suggestedPicks: { rationale: string; index: number }[] = [];
+    if (candidates.length > 1) {
+      const indexed = candidates.map((c, i) => ({ c, i }));
+      const mostUsed = indexed
+        .filter(x => x.c.importer_count > 0)
+        .sort((a, b) =>
+          b.c.importer_count - a.c.importer_count || a.c.file.localeCompare(b.c.file)
+        )[0];
+      if (mostUsed) {
+        suggestedPicks.push({
+          rationale: `most-used (${mostUsed.c.importer_count} importer${mostUsed.c.importer_count === 1 ? '' : 's'})`,
+          index: mostUsed.i,
+        });
+      }
+      const baseType = indexed
+        .filter(x => x.c.relation_summary?.includes('child'))
+        .sort((a, b) => a.c.file.localeCompare(b.c.file))[0];
+      if (baseType && baseType.i !== mostUsed?.i) {
+        suggestedPicks.push({
+          rationale: `base type for the hierarchy (${baseType.c.relation_summary})`,
+          index: baseType.i,
+        });
+      }
+    }
+
+    const uniqueFiles = [...new Set(candidates.map(c => c.file))].sort();
+    const uniqueKinds = [...new Set(candidates.map(c => c.kind))].sort();
+    const uniqueScopes = [...new Set(candidates.map(c => c.scope).filter((s): s is string => !!s))].sort();
+
+    const result: ClarifyResult = {
+      name,
+      candidates,
+      count: candidates.length,
+      unique_disambiguators: {
+        files: uniqueFiles,
+        kinds: uniqueKinds,
+        scopes: uniqueScopes,
+      },
+      suggested_picks: suggestedPicks,
+    };
+    return this.wrap('clarify', queryText, [result], start);
+  }
+
+  /**
+   * Helper for clarify(): does this file_id export `name`? Checks module_edges
+   * for an export row matching the name, or any export with is_default=1
+   * when the symbol is the file's default export.
+   */
+  private isExportedSymbol(fileId: number, name: string): boolean {
+    const exports = this.store.getExportsByFileId(fileId);
+    return exports.some(e => e.name === name || e.alias === name);
   }
 
   /**

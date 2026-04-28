@@ -1090,6 +1090,21 @@ export function createProgram(): Command {
     });
 
   program
+    .command('clarify <name>')
+    .description('Disambiguate an ambiguous symbol — every candidate with file/kind/scope/importers + suggested picks')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((name: string, opts: { pretty?: boolean }) => {
+      const { db } = openQueryDb(workingRoot());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.clarify(name);
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
     .command('rename-safety <name>')
     .description('Composed risk verdict for renaming a symbol — callers + importers + relations + collisions in one call')
     .option('-f, --file <file>', 'Optional file path to disambiguate')

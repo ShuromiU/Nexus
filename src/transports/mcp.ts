@@ -535,6 +535,18 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_clarify',
+          description: 'Disambiguate an ambiguous name (D2). Returns every definition with file + kind + scope + signature + is_export + importer_count + relation_summary, plus heuristic suggested_picks ranked by usage and structural prominence. Use when nexus_find returns multiple results and you need to pick the right one without reading all candidate files.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol name to disambiguate' },
+              ...COMPACT_PROP,
+            },
+            required: ['name'],
+          },
+        },
+        {
           name: 'nexus_rename_safety',
           description: 'Rename safety analysis (B6 v1) — composes refs (B1 ref_kind), importers, and relations (B2) into a single risk verdict. Returns caller breakdown by ref_kind, importer files, child/parent relation counts, optional collision detection, blast_radius, and risk:"low"|"medium"|"high" with machine-readable reasons. Use before renaming an exported symbol — replaces chains of nexus_callers + nexus_importers + nexus_relations.',
           inputSchema: {
@@ -779,6 +791,8 @@ export function createMcpServer(): Server {
           depth: args.depth as number | undefined,
           limit: args.limit as number | undefined,
         });
+      case 'nexus_clarify':
+        return qe.clarify(args.name as string);
       case 'nexus_rename_safety':
         return qe.renameSafety(args.name as string, {
           file: args.file as string | undefined,
