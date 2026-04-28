@@ -1083,6 +1083,32 @@ export function createProgram(): Command {
     });
 
   program
+    .command('tests-for')
+    .description('Find test files that import a source symbol or file (B5)')
+    .option('-n, --name <name>', 'Source symbol name')
+    .option('-f, --file <path>', 'Source file path')
+    .option('-l, --limit <n>', 'Max results', '100')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((opts: { name?: string; file?: string; limit: string; pretty?: boolean }) => {
+      if (!opts.name && !opts.file) {
+        console.error('tests-for: provide --name or --file');
+        process.exit(2);
+      }
+      const { db } = openQueryDb(workingRoot());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.testsFor({
+          ...(opts.name ? { name: opts.name } : {}),
+          ...(opts.file ? { file: opts.file } : {}),
+          limit: parseInt(opts.limit, 10) || 100,
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
     .command('relations <name>')
     .description('Declared structural relationships (extends, implements). TypeScript only in v1.')
     .option('--direction <dir>', 'parents | children | both', 'parents')

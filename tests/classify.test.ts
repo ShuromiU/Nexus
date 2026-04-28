@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyPath } from '../src/workspace/classify.js';
+import { classifyPath, classifyTestPath } from '../src/workspace/classify.js';
 
 const noOverrides = { languages: {} };
 
@@ -105,5 +105,46 @@ describe('classifyPath', () => {
 
   it('is case-insensitive for known basenames', () => {
     expect(classifyPath('PACKAGE.JSON', 'PACKAGE.JSON', noOverrides)).toEqual({ kind: 'package_json' });
+  });
+});
+
+describe('classifyTestPath', () => {
+  it('flags *.test.ts as declared', () => {
+    expect(classifyTestPath('src/foo.test.ts')).toBe('declared');
+    expect(classifyTestPath('src/foo.test.tsx')).toBe('declared');
+    expect(classifyTestPath('packages/x/y.test.js')).toBe('declared');
+  });
+
+  it('flags *.spec.ts as declared', () => {
+    expect(classifyTestPath('src/foo.spec.ts')).toBe('declared');
+    expect(classifyTestPath('packages/x/y.spec.jsx')).toBe('declared');
+  });
+
+  it('flags __tests__/ ancestor as declared', () => {
+    expect(classifyTestPath('src/__tests__/foo.ts')).toBe('declared');
+    expect(classifyTestPath('packages/x/__tests__/nested/foo.ts')).toBe('declared');
+  });
+
+  it('flags top-level tests/ or test/ as derived', () => {
+    expect(classifyTestPath('tests/foo.ts')).toBe('derived');
+    expect(classifyTestPath('test/foo.ts')).toBe('derived');
+  });
+
+  it('returns null for plain source paths', () => {
+    expect(classifyTestPath('src/foo.ts')).toBeNull();
+    expect(classifyTestPath('packages/x/y.ts')).toBeNull();
+  });
+
+  it('does not flag a deep tests/ subdir (only top-level)', () => {
+    expect(classifyTestPath('src/utils/tests/foo.ts')).toBeNull();
+  });
+
+  it('declared trumps derived', () => {
+    expect(classifyTestPath('tests/foo.test.ts')).toBe('declared');
+  });
+
+  it('is case-insensitive', () => {
+    expect(classifyTestPath('SRC/Foo.Test.TS')).toBe('declared');
+    expect(classifyTestPath('Tests/foo.ts')).toBe('derived');
   });
 });

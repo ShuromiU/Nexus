@@ -528,6 +528,19 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_tests_for',
+          description: 'Test-to-source linkage (B5) — given a source symbol `name` or `file`, find test files that import it. Computed at query time from existing import edges + a path-based test classifier. Confidence: "declared" (filename `*.test.*` / `*.spec.*` / `__tests__/`) or "derived" (top-level `tests/` or `test/` directory). Replaces grep for "what tests cover X?". Provide either `name` or `file` (at least one required).',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Source symbol name (resolves to all files declaring this name)' },
+              file: { type: 'string', description: 'Source file path (workspace-relative, POSIX or platform style)' },
+              limit: { type: 'number', description: 'Max results (default 100, max 500)' },
+              ...COMPACT_PROP,
+            },
+          },
+        },
+        {
           name: 'nexus_relations',
           description: 'Declared structural relationships (B2 v1) — extends/implements edges. direction:"parents" answers "what does X extend/implement?", direction:"children" answers "who extends/implements X?". Replaces grep for "extends Foo" / "implements IUser" with a precise, AST-derived edge list. TypeScript only in v1; non-TS adapters report empty. Cross-file targets resolve via imports; unresolved targets carry resolved=false.',
           inputSchema: {
@@ -820,6 +833,12 @@ export function createMcpServer(): Server {
           path: args.path as string | undefined,
           limit: args.limit as number | undefined,
           kinds: args.kinds as string[] | undefined,
+        });
+      case 'nexus_tests_for':
+        return qe.testsFor({
+          name: args.name as string | undefined,
+          file: args.file as string | undefined,
+          limit: args.limit as number | undefined,
         });
       case 'nexus_relations':
         return qe.relations(args.name as string, {

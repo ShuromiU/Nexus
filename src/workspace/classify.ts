@@ -103,6 +103,47 @@ export function classifyPath(
   return { kind: 'ignored' };
 }
 
+/**
+ * Heuristic test-file detector (B5). Path-based — does NOT inspect content.
+ *
+ * Returns the strength of the signal:
+ *   - `declared`: filename pattern (`*.test.*`, `*.spec.*`) or `__tests__/`
+ *     directory. Universally recognised by test runners (Jest, Vitest, Mocha,
+ *     Karma, …) — strong signal.
+ *   - `derived`: file lives under a top-level `tests/` or `test/` directory
+ *     (Vitest convention) but does NOT match the declared patterns. Weaker
+ *     signal: utility files, fixtures, and helpers also live here.
+ *   - `null`: not a test file.
+ *
+ * Path is expected to be a workspace-relative POSIX path (forward slashes).
+ */
+export type TestConfidence = 'declared' | 'derived';
+
+export function classifyTestPath(posixPath: string): TestConfidence | null {
+  const lower = posixPath.toLowerCase();
+  const segments = lower.split('/');
+  const basename = segments[segments.length - 1] ?? '';
+
+  // declared — filename pattern: *.test.* or *.spec.* (any source extension).
+  // The last dot-separated segment before the final extension must be
+  // exactly 'test' or 'spec'.
+  const dotParts = basename.split('.');
+  if (dotParts.length >= 3) {
+    const tag = dotParts[dotParts.length - 2];
+    if (tag === 'test' || tag === 'spec') return 'declared';
+  }
+
+  // declared — any ancestor directory named __tests__.
+  if (segments.some(s => s === '__tests__')) return 'declared';
+
+  // derived — top-level tests/ or test/ directory.
+  if (segments.length >= 2 && (segments[0] === 'tests' || segments[0] === 'test')) {
+    return 'derived';
+  }
+
+  return null;
+}
+
 function isGhaWorkflowPath(posixPath: string, lowerBasename: string): boolean {
   if (!lowerBasename.endsWith('.yml') && !lowerBasename.endsWith('.yaml')) return false;
   // Must be .github/workflows/<file>.{yml,yaml} at exactly that depth.

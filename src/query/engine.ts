@@ -9,7 +9,7 @@ import type { LanguageCapabilities } from '../analysis/languages/registry.js';
 import { extractSource } from '../analysis/extractor.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
-import { classifyPath } from '../workspace/classify.js';
+import { classifyPath, classifyTestPath } from '../workspace/classify.js';
 import {
   loadPackageJson, loadTsconfig, loadGenericJson,
   loadGhaWorkflow, loadGenericYaml,
@@ -40,6 +40,7 @@ export type NexusResultType =
   | 'definition_at'
   | 'unused_exports'
   | 'private_dead'
+  | 'tests_for'
   | 'kind_index'
   | 'doc'
   | 'batch'
@@ -291,6 +292,18 @@ export interface PrivateDeadResult {
   kind: string;
   line: number;
   end_line?: number;
+}
+
+export interface TestsForResult {
+  source_file: string;
+  test_file: string;
+  imported_name?: string;
+  imported_alias?: string;
+  is_default: boolean;
+  is_star: boolean;
+  is_type: boolean;
+  line: number;
+  confidence: 'declared' | 'derived';
 }
 
 export interface DocResult {
@@ -1772,6 +1785,79 @@ export class QueryEngine {
     }
 
     return this.wrap('private_dead', query, results, start);
+  }
+
+  /**
+   * Test-to-source linkage (B5 v1) — given a source `name` or `file`, find
+   * test files that import it. Computed at query time from existing import
+   * edges + a path-based test classifier; no schema bump.
+   *
+   * Resolution:
+   *   - `file`: resolved via `findFile` (exact path_key, lowercase, then
+   *     suffix match).
+   *   - `name`: resolved via `getSymbolsWithFile` to all files declaring a
+   *     same-named symbol; the union of those files is queried for
+   *     importers.
+   *
+   * Confidence:
+   *   - `declared`: importer matches a strong test-file pattern (`*.test.*`,
+   *     `*.spec.*`, `__tests__/`).
+   *   - `derived`: importer lives under a top-level `tests/` or `test/`
+   *     directory but lacks the filename pattern (Vitest convention).
+   *
+   * Non-test importers are filtered out. Star (`import *`) and re-export
+   * importers are included — they still indicate a test pulling in the
+   * module's surface.
+   */
+  testsFor(opts: { name?: string; file?: string; limit?: number }): NexusResult<TestsForResult> {
+    const start = performance.now();
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+    const queryStr = `tests_for ${opts.name ? `--name ${opts.name}` : ''}${opts.file ? `--file ${opts.file}` : ''}`.trim();
+
+    const sourceFileIds: { id: number; path: string }[] = [];
+
+    if (opts.file) {
+      const file = this.findFile(opts.file);
+      if (file) sourceFileIds.push({ id: file.id, path: file.path });
+    } else if (opts.name) {
+      const decls = this.store.getSymbolsWithFile(opts.name);
+      const seen = new Set<number>();
+      for (const d of decls) {
+        const fileId = (d as { file_id: number }).file_id;
+        if (seen.has(fileId)) continue;
+        seen.add(fileId);
+        sourceFileIds.push({ id: fileId, path: d.file_path });
+      }
+    }
+
+    const results: TestsForResult[] = [];
+    const dedupe = new Set<string>();
+
+    for (const src of sourceFileIds) {
+      if (results.length >= limit) break;
+      const importers = this.store.getImportersByResolvedFileId(src.id);
+      for (const imp of importers) {
+        if (results.length >= limit) break;
+        const confidence = classifyTestPath(imp.file_path);
+        if (!confidence) continue;
+        const dedupeKey = `${src.id}|${imp.file_path}|${imp.line}|${imp.name ?? ''}`;
+        if (dedupe.has(dedupeKey)) continue;
+        dedupe.add(dedupeKey);
+        results.push({
+          source_file: src.path,
+          test_file: imp.file_path,
+          ...(imp.name ? { imported_name: imp.name } : {}),
+          ...(imp.alias ? { imported_alias: imp.alias } : {}),
+          is_default: !!imp.is_default,
+          is_star: !!imp.is_star,
+          is_type: !!imp.is_type,
+          line: imp.line,
+          confidence,
+        });
+      }
+    }
+
+    return this.wrap('tests_for', queryStr, results, start);
   }
 
   /**
