@@ -13,6 +13,11 @@ import {
   computeMetricsGate, formatMetricsGate, DEFAULT_THRESHOLDS,
   type MetricsGateReport, type GateThresholds,
 } from '../policy/metrics-gate.js';
+import {
+  computePackMetricsGate, formatPackMetricsGate, DEFAULT_PACK_THRESHOLDS,
+  type PackGateReport, type PackGateThresholds,
+} from '../policy/pack-metrics-gate.js';
+import { openTelemetryDb, recordPackRun, closeTelemetryDb } from '../policy/telemetry.js';
 import type {
   SymbolResult, OccurrenceResult, ModuleEdgeResult,
   TreeEntry, IndexStats, NexusResult, ImporterResult, GrepResult,
@@ -175,6 +180,25 @@ function analyzeTelemetry(
   const db = new Database(dbPath, { readonly: true });
   try {
     return computeMetricsGate(db, {
+      sinceMs: parseSince(sinceSpec),
+      sinceLabel: sinceSpec ?? '30d',
+      thresholds: thresholdOverrides,
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function analyzePackTelemetry(
+  rootDir: string,
+  sinceSpec: string | undefined,
+  thresholdOverrides: Partial<PackGateThresholds>,
+): PackGateReport | null {
+  const dbPath = path.join(rootDir, '.nexus', 'telemetry.db');
+  if (!fs.existsSync(dbPath)) return null;
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return computePackMetricsGate(db, {
       sinceMs: parseSince(sinceSpec),
       sinceLabel: sinceSpec ?? '30d',
       thresholds: thresholdOverrides,
@@ -549,6 +573,36 @@ function printInstallPlan(
 function workingRoot(): string {
   return resolveRoot().startDir;
 }
+
+/**
+ * Build a pack-run recorder that persists to `.nexus/telemetry.db`. Opens
+ * the db lazily on first call and reuses the handle across invocations
+ * for the lifetime of this CLI process. Best-effort: if telemetry can't
+ * be opened, the recorder becomes a no-op. Honors the existing
+ * `NEXUS_TELEMETRY=0|false` opt-out.
+ */
+function makePackRecorder(rootDir: string): (run: import('../query/budget-ledger.js').BudgetEntry) => void {
+  const env = process.env.NEXUS_TELEMETRY;
+  if (env === '0' || env === 'false' || env === 'no') return () => undefined;
+  let db: Database.Database | null | undefined; // undefined = not yet opened
+  return (run) => {
+    try {
+      if (db === undefined) db = openTelemetryDb(rootDir);
+      if (!db) return;
+      recordPackRun(db, {
+        ts_ms: Date.parse(run.timestamp) || Date.now(),
+        session_id: process.env.CLAUDE_SESSION_ID ?? null,
+        query: run.query,
+        budget_tokens: run.budget_tokens,
+        total_tokens: run.total_tokens,
+        included_count: run.included_count,
+        skipped_count: run.skipped_count,
+        timing_ms: run.timing_ms,
+      });
+    } catch { /* swallow — never block pack() */ }
+  };
+}
+
 
 function openQueryDb(startDir: string): { db: ReturnType<typeof openDatabase>; rootDir: string; dbPath: string } {
   const rootDir = detectRoot(startDir);
@@ -972,9 +1026,10 @@ export function createProgram(): Command {
     .option('-p, --paths <paths>', 'Comma-separated path prefixes')
     .option('--pretty', 'Pretty-print JSON')
     .action((query: string, opts: { budget: string; paths?: string; pretty?: boolean }) => {
-      const { db } = openQueryDb(workingRoot());
+      const root = workingRoot();
+      const { db } = openQueryDb(root);
       try {
-        const engine = new QueryEngine(db);
+        const engine = new QueryEngine(db, { packRecorder: makePackRecorder(root) });
         const result = engine.pack(query, {
           budget_tokens: parseInt(opts.budget, 10) || 4000,
           paths: opts.paths ? opts.paths.split(',').map(s => s.trim()) : undefined,
@@ -1337,20 +1392,61 @@ export function createProgram(): Command {
 
   telemetry
     .command('analyze')
-    .description('Evaluate V4 metrics gate (latency + override-rate thresholds)')
+    .description('Evaluate V4 metrics gate (policy rules) or D1 gate (--pack)')
     .option('--since <spec>', 'Time window: 30d, 7d, 1h', '30d')
     .option('--json', 'Emit JSON')
+    .option('--pack', 'Analyze pack-utilization for the D1 gate instead of policy rules')
     .option('--p50-us <n>', 'Override p50 latency threshold (microseconds)')
     .option('--p95-us <n>', 'Override p95 latency threshold (microseconds)')
     .option('--override-rate <f>', 'Override max acceptable override rate (0-1)')
     .option('--min-events <n>', 'Min events per rule for a verdict (default 30)')
+    .option('--hit-budget-warn <f>', 'Pack-mode: hit-budget-rate warn threshold (0-1)')
+    .option('--hit-budget-fail <f>', 'Pack-mode: hit-budget-rate fail threshold (0-1)')
+    .option('--avg-util-warn <f>', 'Pack-mode: avg utilization warn threshold (0-1)')
+    .option('--avg-util-fail <f>', 'Pack-mode: avg utilization fail threshold (0-1)')
+    .option('--min-runs <n>', 'Pack-mode: minimum pack runs for a verdict (default 30)')
     .option('--strict', 'Exit non-zero on warn or fail (default: only fail)')
     .action((opts: {
-      since?: string; json?: boolean;
+      since?: string; json?: boolean; pack?: boolean;
       p50Us?: string; p95Us?: string; overrideRate?: string; minEvents?: string;
+      hitBudgetWarn?: string; hitBudgetFail?: string;
+      avgUtilWarn?: string; avgUtilFail?: string; minRuns?: string;
       strict?: boolean;
     }) => {
       const root = detectRoot(workingRoot());
+
+      if (opts.pack) {
+        const overrides: Partial<PackGateThresholds> = {};
+        if (opts.hitBudgetWarn !== undefined) overrides.hit_budget_warn = Number(opts.hitBudgetWarn);
+        if (opts.hitBudgetFail !== undefined) overrides.hit_budget_fail = Number(opts.hitBudgetFail);
+        if (opts.avgUtilWarn !== undefined) overrides.avg_util_warn = Number(opts.avgUtilWarn);
+        if (opts.avgUtilFail !== undefined) overrides.avg_util_fail = Number(opts.avgUtilFail);
+        if (opts.minRuns !== undefined) overrides.min_runs = Number(opts.minRuns);
+
+        const report = analyzePackTelemetry(root, opts.since, overrides);
+        if (!report) {
+          if (opts.json) {
+            console.log(JSON.stringify({
+              since: opts.since ?? '30d',
+              thresholds: { ...DEFAULT_PACK_THRESHOLDS, ...overrides },
+              total_runs: 0,
+              verdict: 'insufficient_data',
+              reasons: ['no telemetry recorded'],
+            }));
+          } else {
+            console.log('telemetry analyze --pack: no telemetry recorded');
+          }
+          return;
+        }
+        if (opts.json) console.log(JSON.stringify(report));
+        else console.log(formatPackMetricsGate(report));
+
+        if (report.verdict === 'fail' || (opts.strict && report.verdict === 'warn')) {
+          process.exitCode = 1;
+        }
+        return;
+      }
+
       const overrides: Partial<GateThresholds> = {};
       if (opts.p50Us !== undefined) overrides.p50_us = Number(opts.p50Us);
       if (opts.p95Us !== undefined) overrides.p95_us = Number(opts.p95Us);

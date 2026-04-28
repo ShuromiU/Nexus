@@ -27,6 +27,19 @@ CREATE INDEX IF NOT EXISTS idx_events_session_hash
   WHERE session_id IS NOT NULL AND input_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_events_rule_decision ON events(rule, decision);
+CREATE TABLE IF NOT EXISTS pack_runs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_ms INTEGER NOT NULL,
+  session_id TEXT,
+  query TEXT NOT NULL,
+  budget_tokens INTEGER NOT NULL,
+  total_tokens INTEGER NOT NULL,
+  included_count INTEGER NOT NULL,
+  skipped_count INTEGER NOT NULL,
+  timing_ms REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pack_runs_ts ON pack_runs(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_pack_runs_session ON pack_runs(session_id);
 `;
 
 export interface TelemetryEvent {
@@ -118,6 +131,43 @@ export function recordEvent(db: Database.Database | null, ev: TelemetryEvent): v
   }
 }
 
+/** D4 v2 — pack-utilization persistence. Best-effort, never throws. */
+export interface PackRunRecord {
+  ts_ms: number;
+  session_id: string | null;
+  query: string;
+  budget_tokens: number;
+  total_tokens: number;
+  included_count: number;
+  skipped_count: number;
+  timing_ms: number;
+}
+
+const INSERT_PACK_RUN_SQL = `
+INSERT INTO pack_runs
+  (ts_ms, session_id, query, budget_tokens, total_tokens,
+   included_count, skipped_count, timing_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+export function recordPackRun(db: Database.Database | null, run: PackRunRecord): void {
+  if (!db) return;
+  try {
+    db.prepare(INSERT_PACK_RUN_SQL).run(
+      run.ts_ms,
+      run.session_id,
+      run.query,
+      run.budget_tokens,
+      run.total_tokens,
+      run.included_count,
+      run.skipped_count,
+      run.timing_ms,
+    );
+  } catch {
+    /* swallow — telemetry must never block pack() */
+  }
+}
+
 const RETENTION_DAYS = 30;
 const RETENTION_ROW_CAP = 100_000;
 const PRUNE_INTERVAL_MS = 24 * 3600 * 1000;
@@ -136,12 +186,31 @@ export function pruneIfDue(db: Database.Database, now: number = Date.now()): { p
       'DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)'
     ).run(RETENTION_ROW_CAP);
 
+    // pack_runs uses the same retention window. The table won't exist on a
+    // pre-D4-v2 db (CREATE TABLE IF NOT EXISTS in tryOpen handles it on
+    // open) but try/catch is wrapping the whole prune anyway.
+    let packTimeChanges = 0;
+    let packCountChanges = 0;
+    try {
+      const packTimeRes = db.prepare('DELETE FROM pack_runs WHERE ts_ms < ?').run(cutoff);
+      const packCountRes = db.prepare(
+        'DELETE FROM pack_runs WHERE id NOT IN (SELECT id FROM pack_runs ORDER BY id DESC LIMIT ?)'
+      ).run(RETENTION_ROW_CAP);
+      packTimeChanges = Number(packTimeRes.changes);
+      packCountChanges = Number(packCountRes.changes);
+    } catch {
+      /* table missing on legacy schema — ignore */
+    }
+
     db.prepare(
       "INSERT INTO meta(key, value) VALUES('last_prune_ts', ?) " +
       "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
     ).run(String(now));
 
-    return { pruned: Number(timeRes.changes) + Number(countRes.changes) };
+    return {
+      pruned:
+        Number(timeRes.changes) + Number(countRes.changes) + packTimeChanges + packCountChanges,
+    };
   } catch {
     return { pruned: 0 };
   }

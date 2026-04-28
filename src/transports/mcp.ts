@@ -20,6 +20,8 @@ import type Database from 'better-sqlite3';
 import { dispatchPolicy } from '../policy/dispatcher.js';
 import { DEFAULT_RULES } from '../policy/index.js';
 import type { PolicyEvent } from '../policy/types.js';
+import { openTelemetryDb, recordPackRun, closeTelemetryDb } from '../policy/telemetry.js';
+import type { BudgetEntry } from '../query/budget-ledger.js';
 
 // Side-effect: register all language adapters
 import '../analysis/languages/typescript.js';
@@ -33,6 +35,7 @@ import '../analysis/languages/csharp.js';
 
 let db: Database.Database | null = null;
 let engine: QueryEngine | null = null;
+let telemetryDb: Database.Database | null = null;
 let workspaceInfo: WorkspaceInfo | null = null;
 let effectiveIndexMode: 'full' | 'overlay-on-parent' | 'worktree-isolated' = 'full';
 let indexRootDir: string | null = null;
@@ -50,12 +53,37 @@ function getEngine(): QueryEngine {
  * via `closeEngine()` before calling.
  */
 function openEngine(info: WorkspaceInfo, indexMode: typeof effectiveIndexMode): void {
+  // Open the persistent telemetry db once per session (D4 v2). Honors the
+  // NEXUS_TELEMETRY=0|false opt-out. Errors → recorder no-ops.
+  if (telemetryDb === null) {
+    const env = process.env.NEXUS_TELEMETRY;
+    if (env !== '0' && env !== 'false' && env !== 'no') {
+      telemetryDb = openTelemetryDb(info.root);
+    }
+  }
+  const sessionId = process.env.CLAUDE_SESSION_ID ?? null;
+  const packRecorder = (run: BudgetEntry): void => {
+    try {
+      if (!telemetryDb) return;
+      recordPackRun(telemetryDb, {
+        ts_ms: Date.parse(run.timestamp) || Date.now(),
+        session_id: sessionId,
+        query: run.query,
+        budget_tokens: run.budget_tokens,
+        total_tokens: run.total_tokens,
+        included_count: run.included_count,
+        skipped_count: run.skipped_count,
+        timing_ms: run.timing_ms,
+      });
+    } catch { /* swallow */ }
+  };
+
   if (info.mode === 'worktree' && indexMode === 'overlay-on-parent') {
     // Parent index opened read-only; overlay attached read-only via URI mode=ro.
     db = openDatabase(info.baseIndexPath, { readonly: true });
     const store = new NexusStore(db);
     store.attachOverlay(info.overlayPath);
-    engine = new QueryEngine(db, { sourceRoot: info.sourceRoot });
+    engine = new QueryEngine(db, { sourceRoot: info.sourceRoot, packRecorder });
   } else {
     // Standalone, main, or worktree-isolated: single self-contained index.
     const dbPath = info.mode === 'worktree'
@@ -63,13 +91,17 @@ function openEngine(info: WorkspaceInfo, indexMode: typeof effectiveIndexMode): 
       : path.join(info.root, '.nexus', 'index.db');
     db = openDatabase(dbPath);
     applySchema(db);
-    engine = new QueryEngine(db, { sourceRoot: info.sourceRoot });
+    engine = new QueryEngine(db, { sourceRoot: info.sourceRoot, packRecorder });
   }
   effectiveIndexMode = indexMode;
 }
 
 function closeEngine(): void {
   try { db?.close(); } catch { /* ignore */ }
+  if (telemetryDb) {
+    try { closeTelemetryDb(telemetryDb); } catch { /* ignore */ }
+    telemetryDb = null;
+  }
   db = null;
   engine = null;
 }

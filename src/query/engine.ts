@@ -578,6 +578,14 @@ export interface QueryEngineOptions {
   sourceRoot?: string;
   /** Inject a shared BudgetLedger (e.g. process-level) — defaults to a fresh per-engine one. */
   budgetLedger?: BudgetLedger;
+  /**
+   * Optional persistent pack-run recorder (D4 v2). CLI / MCP supply a
+   * function that writes each pack() call to `.nexus/telemetry.db`. Tests
+   * and library consumers leave it unset → no persistence. Errors inside
+   * the recorder must never propagate; the recorder itself is responsible
+   * for swallowing them.
+   */
+  packRecorder?: (run: BudgetEntry) => void;
 }
 
 export class QueryEngine {
@@ -586,12 +594,14 @@ export class QueryEngine {
   private sourceRootOverride: string | null;
   /** Per-session pack() ring buffer (D4). Surfaced via `stats({ session: true })`. */
   readonly budgetLedger: BudgetLedger;
+  private packRecorder: (run: BudgetEntry) => void;
 
   constructor(db: Database.Database, opts: QueryEngineOptions = {}) {
     this.db = db;
     this.store = new NexusStore(db);
     this.sourceRootOverride = opts.sourceRoot ?? null;
     this.budgetLedger = opts.budgetLedger ?? new BudgetLedger();
+    this.packRecorder = opts.packRecorder ?? (() => undefined);
   }
 
   /**
@@ -2561,7 +2571,7 @@ export class QueryEngine {
       skipped,
     };
     const wrapped = this.wrap('pack', queryStr, [result], start);
-    this.budgetLedger.record({
+    const entry: BudgetEntry = {
       query: queryText,
       budget_tokens: budget,
       total_tokens: totalTokens,
@@ -2569,7 +2579,9 @@ export class QueryEngine {
       skipped_count: skipped.length,
       timing_ms: wrapped.timing_ms,
       timestamp: new Date().toISOString(),
-    });
+    };
+    this.budgetLedger.record(entry);
+    try { this.packRecorder(entry); } catch { /* never propagate */ }
     return wrapped;
   }
 

@@ -152,4 +152,73 @@ describe('nexus telemetry analyze', () => {
     expect(parsed.rules.old).toBeUndefined();
     expect(parsed.rules.new).toBeDefined();
   });
+
+  it('--pack on missing DB reports insufficient_data', () => {
+    const { stdout, status } = runCli(['telemetry', 'analyze', '--pack', '--json']);
+    const parsed = JSON.parse(stdout);
+    expect(parsed.verdict).toBe('insufficient_data');
+    expect(parsed.total_runs).toBe(0);
+    expect(status).toBe(0);
+  });
+
+  it('--pack reports verdict from pack_runs table', () => {
+    fs.mkdirSync(path.join(tmpRoot, '.nexus'), { recursive: true });
+    const dbPath = path.join(tmpRoot, '.nexus', 'telemetry.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO meta VALUES('schema_version','1');
+      CREATE TABLE pack_runs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms INTEGER NOT NULL,
+        session_id TEXT,
+        query TEXT NOT NULL,
+        budget_tokens INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        included_count INTEGER NOT NULL,
+        skipped_count INTEGER NOT NULL,
+        timing_ms REAL NOT NULL
+      );
+    `);
+    const stmt = db.prepare(`INSERT INTO pack_runs
+      (ts_ms, session_id, query, budget_tokens, total_tokens, included_count, skipped_count, timing_ms)
+      VALUES (?, NULL, 'q', 1000, 200, 3, 0, 5)`);
+    for (let i = 0; i < 30; i++) stmt.run(Date.now());
+    db.close();
+
+    const { stdout, status } = runCli(['telemetry', 'analyze', '--pack', '--json']);
+    const parsed = JSON.parse(stdout);
+    expect(parsed.verdict).toBe('pass');
+    expect(parsed.total_runs).toBe(30);
+    expect(status).toBe(0);
+  });
+
+  it('--pack --strict exits non-zero on warn', () => {
+    fs.mkdirSync(path.join(tmpRoot, '.nexus'), { recursive: true });
+    const dbPath = path.join(tmpRoot, '.nexus', 'telemetry.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO meta VALUES('schema_version','1');
+      CREATE TABLE pack_runs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms INTEGER NOT NULL,
+        session_id TEXT,
+        query TEXT NOT NULL,
+        budget_tokens INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        included_count INTEGER NOT NULL,
+        skipped_count INTEGER NOT NULL,
+        timing_ms REAL NOT NULL
+      );
+    `);
+    const stmt = db.prepare(`INSERT INTO pack_runs
+      (ts_ms, session_id, query, budget_tokens, total_tokens, included_count, skipped_count, timing_ms)
+      VALUES (?, NULL, 'q', 1000, 870, 3, 1, 5)`);
+    for (let i = 0; i < 30; i++) stmt.run(Date.now());
+    db.close();
+
+    const { status } = runCli(['telemetry', 'analyze', '--pack', '--strict', '--json']);
+    expect(status).toBe(1);
+  });
 });
