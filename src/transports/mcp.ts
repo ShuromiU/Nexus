@@ -535,6 +535,20 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_rename_safety',
+          description: 'Rename safety analysis (B6 v1) — composes refs (B1 ref_kind), importers, and relations (B2) into a single risk verdict. Returns caller breakdown by ref_kind, importer files, child/parent relation counts, optional collision detection, blast_radius, and risk:"low"|"medium"|"high" with machine-readable reasons. Use before renaming an exported symbol — replaces chains of nexus_callers + nexus_importers + nexus_relations.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol to analyze' },
+              file: { type: 'string', description: 'Optional file path to disambiguate when the name resolves multiply' },
+              new_name: { type: 'string', description: 'Optional proposed new name — when set, collision detection runs against existing same-file/same-module symbols' },
+              ...COMPACT_PROP,
+            },
+            required: ['name'],
+          },
+        },
+        {
           name: 'nexus_kind_index',
           description: 'List every symbol of a given kind (interface, class, component, hook, etc.) under an optional path prefix. Replaces grep/search chains for "show me every <kind> in this folder".',
           inputSchema: {
@@ -764,6 +778,11 @@ export function createMcpServer(): Server {
           kind: args.kind as string | undefined,
           depth: args.depth as number | undefined,
           limit: args.limit as number | undefined,
+        });
+      case 'nexus_rename_safety':
+        return qe.renameSafety(args.name as string, {
+          file: args.file as string | undefined,
+          new_name: args.new_name as string | undefined,
         });
       case 'nexus_kind_index':
         return qe.kindIndex(args.kind as string, {

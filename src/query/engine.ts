@@ -46,6 +46,7 @@ export type NexusResultType =
   | 'structured_outline'
   | 'lockfile_deps'
   | 'relations'
+  | 'rename_safety'
   | 'policy_check';
 
 export interface NexusResult<T> {
@@ -356,6 +357,93 @@ export interface RelationsResult {
   query: { name: string; direction: string; kind?: string; depth: number };
   results: RelationEdgeResult[];
   count: number;
+}
+
+// ── Rename safety (B6) ────────────────────────────────────────────────
+
+export type RiskLevel = 'low' | 'medium' | 'high';
+
+export interface RenameRiskInputs {
+  callerCount: number;
+  refKinds: Record<string, number>;
+  importerCount: number;
+  childCount: number;
+  parentCount: number;
+  sameFileCollisions: number;
+  sameModuleCollisions: number;
+}
+
+/**
+ * Pure risk classifier — exported for testability. Order matters: high gates
+ * are checked first, then medium, then default low.
+ */
+export function classifyRenameRisk(input: RenameRiskInputs): {
+  risk: RiskLevel;
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+  let risk: RiskLevel = 'low';
+
+  // High gates.
+  if (input.childCount > 0) {
+    reasons.push(`has_children:${input.childCount}`);
+    risk = 'high';
+  }
+  if (input.importerCount > 0) {
+    reasons.push(`has_importers:${input.importerCount}`);
+    risk = 'high';
+  }
+  if (input.sameModuleCollisions > 0) {
+    reasons.push(`same_module_collision:${input.sameModuleCollisions}`);
+    risk = 'high';
+  }
+  if (risk === 'high') return { risk, reasons };
+
+  // Medium gates.
+  if (input.callerCount > 0) {
+    reasons.push(`has_callers:${input.callerCount}`);
+    risk = 'medium';
+  }
+  const typeRefs = input.refKinds['type-ref'] ?? 0;
+  if (typeRefs > 0 && !reasons.some(r => r.startsWith('has_callers'))) {
+    reasons.push(`has_type_refs:${typeRefs}`);
+    risk = 'medium';
+  }
+  if (input.parentCount > 0) {
+    reasons.push(`has_parents:${input.parentCount}`);
+    risk = risk === 'low' ? 'medium' : risk;
+  }
+  if (input.sameFileCollisions > 0) {
+    reasons.push(`same_file_collision:${input.sameFileCollisions}`);
+    risk = risk === 'low' ? 'medium' : risk;
+  }
+
+  if (risk === 'low') reasons.push('no_external_refs');
+  return { risk, reasons };
+}
+
+export interface RenameSafetyResult {
+  symbol: { name: string; kind: string; file: string; line: number; language: string };
+  callers: {
+    count: number;
+    ref_kinds: Record<string, number>;
+    files: string[];
+  };
+  importers: {
+    count: number;
+    files: string[];
+  };
+  relations: {
+    children: { count: number; kinds: Record<string, number> };
+    parents: { count: number; kinds: Record<string, number> };
+  };
+  collisions: {
+    same_file: { name: string; kind: string; line: number }[];
+    same_module: { name: string; kind: string; file: string; line: number }[];
+  };
+  blast_radius: number;
+  risk: RiskLevel;
+  reasons: string[];
 }
 
 // ── Query Engine ──────────────────────────────────────────────────────
@@ -1629,6 +1717,138 @@ export class QueryEngine {
       count: out.length,
     };
     return this.wrap('relations', queryText, [result], start);
+  }
+
+  /**
+   * Rename safety analysis (B6 v1) — composes refs (B1 ref_kind), importers,
+   * relations (B2), and collision detection into a single risk verdict.
+   *
+   * Risk model:
+   *   high   — has children edges (renaming breaks subclasses), OR has importers
+   *            (cross-module surface), OR new_name collides with same-module symbol.
+   *   medium — has callers/type-refs in same module, OR has parent edges, OR
+   *            new_name collides only in same file.
+   *   low    — no callers, no importers, no relations.
+   */
+  renameSafety(
+    name: string,
+    opts?: { file?: string; new_name?: string },
+  ): NexusResult<RenameSafetyResult> {
+    const start = performance.now();
+    const queryText = `rename-safety ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.new_name ? ` --new ${opts.new_name}` : ''}`;
+
+    // Resolve target symbol (disambiguate by file when provided).
+    const candidates = this.store.getSymbolsWithFile(name);
+    const sym = opts?.file
+      ? candidates.find(c => c.file_path === opts.file || c.file_path.endsWith(opts.file!))
+      : candidates[0];
+    if (!sym) {
+      const empty: RenameSafetyResult = {
+        symbol: { name, kind: '', file: opts?.file ?? '', line: 0, language: '' },
+        callers: { count: 0, ref_kinds: {}, files: [] },
+        importers: { count: 0, files: [] },
+        relations: {
+          children: { count: 0, kinds: {} },
+          parents: { count: 0, kinds: {} },
+        },
+        collisions: { same_file: [], same_module: [] },
+        blast_radius: 0,
+        risk: 'low',
+        reasons: ['symbol_not_found'],
+      };
+      return this.wrap('rename_safety', queryText, [empty], start);
+    }
+
+    // Callers: occurrences excluding the declaration row itself.
+    const occRows = this.store.getOccurrencesWithFile(name);
+    const refKinds: Record<string, number> = {};
+    const callerFiles = new Set<string>();
+    let callerCount = 0;
+    for (const o of occRows) {
+      if (o.file_path === sym.file_path && o.line === sym.line) continue; // declaration
+      const rk = o.ref_kind ?? 'unknown';
+      refKinds[rk] = (refKinds[rk] ?? 0) + 1;
+      callerFiles.add(o.file_path);
+      callerCount++;
+    }
+
+    // Importers: any module_edge that resolves to this symbol's file.
+    const imports = this.store.getImportersByResolvedFileId(sym.file_id);
+    const importerFiles = new Set<string>();
+    for (const e of imports) {
+      // Only count if it imports this name (or is a star-import).
+      if (e.is_star || e.name === name || e.alias === name) {
+        importerFiles.add(e.file_path);
+      }
+    }
+
+    // Relations: parents (what `name` extends/implements) + children (who extends `name`).
+    const childRows = this.store.getRelationsByTarget(name);
+    const parentRows = this.store.getRelationsBySource(name);
+    const childKinds: Record<string, number> = {};
+    const parentKinds: Record<string, number> = {};
+    for (const r of childRows) childKinds[r.kind] = (childKinds[r.kind] ?? 0) + 1;
+    for (const r of parentRows) parentKinds[r.kind] = (parentKinds[r.kind] ?? 0) + 1;
+
+    // Collisions: only relevant when new_name supplied.
+    const sameFileCollisions: { name: string; kind: string; line: number }[] = [];
+    const sameModuleCollisions: { name: string; kind: string; file: string; line: number }[] = [];
+    if (opts?.new_name && opts.new_name !== name) {
+      const colliders = this.store.getSymbolsWithFile(opts.new_name);
+      for (const c of colliders) {
+        if (c.file_path === sym.file_path) {
+          sameFileCollisions.push({ name: c.name, kind: c.kind, line: c.line });
+        } else {
+          // "Same module" v1 = same directory.
+          const sd = sym.file_path.includes('/') ? sym.file_path.slice(0, sym.file_path.lastIndexOf('/')) : '';
+          const cd = c.file_path.includes('/') ? c.file_path.slice(0, c.file_path.lastIndexOf('/')) : '';
+          if (sd === cd) {
+            sameModuleCollisions.push({ name: c.name, kind: c.kind, file: c.file_path, line: c.line });
+          }
+        }
+      }
+    }
+
+    const { risk, reasons } = classifyRenameRisk({
+      callerCount,
+      refKinds,
+      importerCount: importerFiles.size,
+      childCount: childRows.length,
+      parentCount: parentRows.length,
+      sameFileCollisions: sameFileCollisions.length,
+      sameModuleCollisions: sameModuleCollisions.length,
+    });
+
+    const result: RenameSafetyResult = {
+      symbol: {
+        name: sym.name,
+        kind: sym.kind,
+        file: sym.file_path,
+        line: sym.line,
+        language: sym.file_language,
+      },
+      callers: {
+        count: callerCount,
+        ref_kinds: refKinds,
+        files: [...callerFiles].sort(),
+      },
+      importers: {
+        count: importerFiles.size,
+        files: [...importerFiles].sort(),
+      },
+      relations: {
+        children: { count: childRows.length, kinds: childKinds },
+        parents: { count: parentRows.length, kinds: parentKinds },
+      },
+      collisions: {
+        same_file: sameFileCollisions,
+        same_module: sameModuleCollisions,
+      },
+      blast_radius: callerCount + importerFiles.size + childRows.length,
+      risk,
+      reasons,
+    };
+    return this.wrap('rename_safety', queryText, [result], start);
   }
 
   /**
