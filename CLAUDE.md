@@ -102,7 +102,7 @@ TypeScript/JavaScript (.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs), Python, Go, Rust,
 
 **High-savings:** `nexus_outline`, `nexus_source`, `nexus_slice`, `nexus_deps`
 
-**New token-savers:** `nexus_callers`, `nexus_pack`, `nexus_changed`, `nexus_diff_outline`, `nexus_signatures`, `nexus_definition_at`, `nexus_unused_exports`, `nexus_kind_index`, `nexus_doc`, `nexus_batch`
+**New token-savers:** `nexus_callers`, `nexus_pack`, `nexus_changed`, `nexus_diff_outline`, `nexus_signatures`, `nexus_definition_at`, `nexus_unused_exports`, `nexus_private_dead`, `nexus_kind_index`, `nexus_doc`, `nexus_batch`
 
 **Structured files (A3):** `nexus_structured_query`, `nexus_structured_outline`, `nexus_lockfile_deps`
 
@@ -130,6 +130,7 @@ Every tool accepts an optional `compact: true` flag that returns a minimal-key e
 - **`nexus_definition_at(file, line, col?)`** — LSP-style go-to-definition. Resolves the identifier at a position to its definition source. Best-effort heuristic; column-precise when given.
 - **`nexus_unused_exports(path?, limit?)`** — Dead-code finder. Exports with no importers and no external occurrences. Note: re-exports through index.ts may appear unused; use `path` to scope.
   Supports `mode: 'default' | 'runtime_only'`. Default behavior unchanged; `runtime_only` excludes type-only imports and type-ref occurrences (TS/JS only).
+- **`nexus_private_dead(path?, limit?, kinds?)`** — Sister tool to `nexus_unused_exports` (B4). Finds *private* dead code: top-level symbols that are NOT exported and have zero in-file references beyond the declaration line. Default `kinds`: `function`, `class`, `interface`, `type`, `enum`, `constant`, `variable`, `hook`, `component`. Skips files containing `export *` (would let any symbol escape — analysis would be unsound). Heuristic: an occurrence on the symbol's declaration line is treated as the declaration itself; any occurrence on a different line counts as a use. Cross-file occurrences are ignored — a non-exported symbol cannot be referenced from another file by import. Source: [src/query/engine.ts](src/query/engine.ts) `privateDeadCode` + [src/db/store.ts](src/db/store.ts) `getNonExportedTopLevelSymbols`.
 - **`nexus_kind_index(kind, path?, limit?)`** — Every symbol of a given kind (`interface`, `class`, `component`, `hook`, …) under an optional path prefix. Replaces grep/search chains for "show me every X in this folder".
 
 ### Composed Workflow Tools (B6, D2)

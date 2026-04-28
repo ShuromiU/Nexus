@@ -511,6 +511,23 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_private_dead',
+          description: 'Find private dead code (B4) — top-level symbols that are NOT exported and have zero in-file references beyond the declaration site. Sister tool to nexus_unused_exports: that finds public dead code (exported, no importer); this finds private dead code (unexported, never used internally). Skips files containing `export *` (would let any symbol escape — analysis would be unsound).',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              path: { type: 'string', description: 'Optional path prefix to scope (e.g. "src/")' },
+              limit: { type: 'number', description: 'Max results (default 100, max 500)' },
+              kinds: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional list of symbol kinds to include. Default: function, class, interface, type, enum, constant, variable, hook, component.',
+              },
+              ...COMPACT_PROP,
+            },
+          },
+        },
+        {
           name: 'nexus_relations',
           description: 'Declared structural relationships (B2 v1) — extends/implements edges. direction:"parents" answers "what does X extend/implement?", direction:"children" answers "who extends/implements X?". Replaces grep for "extends Foo" / "implements IUser" with a precise, AST-derived edge list. TypeScript only in v1; non-TS adapters report empty. Cross-file targets resolve via imports; unresolved targets carry resolved=false.',
           inputSchema: {
@@ -797,6 +814,12 @@ export function createMcpServer(): Server {
           path: args.path as string | undefined,
           limit: args.limit as number | undefined,
           mode: args.mode as 'default' | 'runtime_only' | undefined,
+        });
+      case 'nexus_private_dead':
+        return qe.privateDeadCode({
+          path: args.path as string | undefined,
+          limit: args.limit as number | undefined,
+          kinds: args.kinds as string[] | undefined,
         });
       case 'nexus_relations':
         return qe.relations(args.name as string, {

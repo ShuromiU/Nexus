@@ -175,6 +175,16 @@ describe('MCP schemas surface new options', () => {
     expect(schema.required).toEqual(['file']);
   });
 
+  it('registers nexus_private_dead with path + limit + kinds', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_private_dead');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
+    expect(schema.properties).toHaveProperty('path');
+    expect(schema.properties).toHaveProperty('limit');
+    expect(schema.properties).toHaveProperty('kinds');
+  });
+
   it('registers nexus_relations with name + direction + kind + depth', async () => {
     const tools = await getRegisteredTools();
     const tool = tools.find(t => t.name === 'nexus_relations');

@@ -1061,6 +1061,67 @@ export class NexusStore {
   }
 
   /**
+   * Top-level (scope IS NULL) symbols that are NOT exported from their file.
+   * Used by `privateDeadCode()` to find candidates for dead-code analysis.
+   * Excludes:
+   *   - kinds that aren't user-defined declarations (parameter, import, etc.)
+   *   - symbols whose file has any `export *` re-export (would let any symbol
+   *     escape and the analysis would be unsound)
+   *
+   * "Not exported" = no `module_edges` row with kind='export' that either
+   *   shares the symbol's row id, OR shares the symbol's name within the same
+   *   file (covers `export { foo }` + `export const foo = …` styles).
+   *
+   * Optional path prefix filter and kind list (defaults are caller-side).
+   */
+  getNonExportedTopLevelSymbols(opts?: {
+    pathPrefix?: string;
+    kinds?: string[];
+  }): SymbolWithFile[] {
+    const kinds = opts?.kinds ?? [
+      'function',
+      'class',
+      'interface',
+      'type',
+      'enum',
+      'constant',
+      'variable',
+      'hook',
+      'component',
+    ];
+    const kindPlaceholders = kinds.map(() => '?').join(',');
+
+    const params: unknown[] = [...kinds];
+    let pathClause = '';
+    if (opts?.pathPrefix) {
+      pathClause = ' AND f.path LIKE ?';
+      params.push(`${opts.pathPrefix}%`);
+    }
+
+    const sql = `
+      SELECT s.*, f.path AS file_path, f.language AS file_language
+      FROM symbols s
+      JOIN files f ON s.file_id = f.id
+      WHERE s.scope IS NULL
+        AND s.kind IN (${kindPlaceholders})
+        ${pathClause}
+        AND NOT EXISTS (
+          SELECT 1 FROM module_edges me
+          WHERE me.file_id = s.file_id
+            AND me.kind IN ('export', 're-export')
+            AND (me.symbol_id = s.id OR me.name = s.name)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM module_edges me
+          WHERE me.file_id = s.file_id
+            AND me.kind = 're-export'
+            AND me.is_star = 1
+        )
+      ORDER BY f.path, s.line, s.col`;
+    return this.db.prepare(sql).all(...params) as SymbolWithFile[];
+  }
+
+  /**
    * List symbols of a kind, optionally restricted to files under a path prefix.
    */
   getSymbolsByKindAndPath(kind: string, pathPrefix?: string): SymbolWithFile[] {

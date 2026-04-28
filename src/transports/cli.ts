@@ -1061,6 +1061,28 @@ export function createProgram(): Command {
     });
 
   program
+    .command('private-dead')
+    .description('Find private dead code: top-level symbols not exported and unreferenced in their own file')
+    .option('-p, --path <prefix>', 'Path prefix to scope (e.g. "src/")')
+    .option('-l, --limit <n>', 'Max results', '100')
+    .option('--kinds <list>', 'Comma-separated symbol kinds (default: function,class,interface,type,enum,constant,variable,hook,component)')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((opts: { path?: string; limit: string; kinds?: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(workingRoot());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.privateDeadCode({
+          path: opts.path,
+          limit: parseInt(opts.limit, 10) || 100,
+          ...(opts.kinds ? { kinds: opts.kinds.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
     .command('relations <name>')
     .description('Declared structural relationships (extends, implements). TypeScript only in v1.')
     .option('--direction <dir>', 'parents | children | both', 'parents')

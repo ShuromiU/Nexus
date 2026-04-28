@@ -39,6 +39,7 @@ export type NexusResultType =
   | 'signatures'
   | 'definition_at'
   | 'unused_exports'
+  | 'private_dead'
   | 'kind_index'
   | 'doc'
   | 'batch'
@@ -282,6 +283,14 @@ export interface UnusedExportResult {
   name: string;
   kind: string;
   line: number;
+}
+
+export interface PrivateDeadResult {
+  file: string;
+  name: string;
+  kind: string;
+  line: number;
+  end_line?: number;
 }
 
 export interface DocResult {
@@ -1715,6 +1724,54 @@ export class QueryEngine {
     }
 
     return this.wrap('unused_exports', query, results, start);
+  }
+
+  /**
+   * Private dead code (B4) — top-level symbols that are NOT exported and have
+   * zero references in their own file beyond the declaration site. Sister tool
+   * to `unusedExports`: that finds public dead code (exported, no importer);
+   * this finds private dead code (unexported, never used internally either).
+   *
+   * Heuristic: occurrences on the symbol's declaration line are treated as
+   * the declaration site (the extractor emits an occurrence for the name in
+   * the declaration itself, with col=name-position rather than col=0). Any
+   * occurrence on a different line of the same file counts as evidence of
+   * life. Cross-file occurrences are ignored — a private (non-exported)
+   * symbol cannot be referenced from another file by import.
+   */
+  privateDeadCode(
+    opts?: { path?: string; limit?: number; kinds?: string[] },
+  ): NexusResult<PrivateDeadResult> {
+    const start = performance.now();
+    const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
+    const kindSuffix = opts?.kinds?.length ? ` --kinds ${opts.kinds.join(',')}` : '';
+    const query = `private_dead${opts?.path ? ` --path ${opts.path}` : ''}${kindSuffix}`;
+
+    const candidates = this.store.getNonExportedTopLevelSymbols({
+      pathPrefix: opts?.path,
+      ...(opts?.kinds ? { kinds: opts.kinds } : {}),
+    });
+    const results: PrivateDeadResult[] = [];
+
+    for (const sym of candidates) {
+      if (results.length >= limit) break;
+
+      const occurrences = this.store
+        .getOccurrencesByName(sym.name)
+        .filter(o => o.file_id === sym.file_id);
+      const nonDecl = occurrences.filter(o => o.line !== sym.line);
+      if (nonDecl.length > 0) continue;
+
+      results.push({
+        file: sym.file_path,
+        name: sym.name,
+        kind: sym.kind,
+        line: sym.line,
+        ...(sym.end_line != null ? { end_line: sym.end_line } : {}),
+      });
+    }
+
+    return this.wrap('private_dead', query, results, start);
   }
 
   /**
