@@ -1083,6 +1083,28 @@ export function createProgram(): Command {
     });
 
   program
+    .command('stale-docs')
+    .description('Detect functions/methods whose @param tags drift from their signature (B3)')
+    .option('-p, --path <prefix>', 'Path prefix to scope (e.g. "src/")')
+    .option('-l, --limit <n>', 'Max results', '100')
+    .option('--kinds <list>', 'Comma-separated symbol kinds (default: function,method,hook,component)')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((opts: { path?: string; limit: string; kinds?: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(workingRoot());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.staleDocs({
+          path: opts.path,
+          limit: parseInt(opts.limit, 10) || 100,
+          ...(opts.kinds ? { kinds: opts.kinds.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
     .command('tests-for')
     .description('Find test files that import a source symbol or file (B5)')
     .option('-n, --name <name>', 'Source symbol name')

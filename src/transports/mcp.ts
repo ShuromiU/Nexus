@@ -528,6 +528,23 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_stale_docs',
+          description: 'Detect stale JSDoc (B3) — flag functions/methods/hooks/components whose `@param` tags do not agree with the actual signature. Reports `unknown_param` (doc references a name that is not in the signature) and `undocumented_param` (signature has a param that the doc — which has at least one @param tag — does not mention). Only flags symbols that have at least one @param tag; fully undocumented symbols are out of scope. Uses the extractor\'s already-stored `doc` and `signature` columns — pure post-hoc analysis, no schema bump.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              path: { type: 'string', description: 'Optional path prefix to scope (e.g. "src/")' },
+              kinds: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional list of symbol kinds to include. Default: function, method, hook, component.',
+              },
+              limit: { type: 'number', description: 'Max results (default 100, max 500)' },
+              ...COMPACT_PROP,
+            },
+          },
+        },
+        {
           name: 'nexus_tests_for',
           description: 'Test-to-source linkage (B5) — given a source symbol `name` or `file`, find test files that import it. Computed at query time from existing import edges + a path-based test classifier. Confidence: "declared" (filename `*.test.*` / `*.spec.*` / `__tests__/`) or "derived" (top-level `tests/` or `test/` directory). Replaces grep for "what tests cover X?". Provide either `name` or `file` (at least one required).',
           inputSchema: {
@@ -838,6 +855,12 @@ export function createMcpServer(): Server {
         return qe.testsFor({
           name: args.name as string | undefined,
           file: args.file as string | undefined,
+          limit: args.limit as number | undefined,
+        });
+      case 'nexus_stale_docs':
+        return qe.staleDocs({
+          path: args.path as string | undefined,
+          kinds: args.kinds as string[] | undefined,
           limit: args.limit as number | undefined,
         });
       case 'nexus_relations':

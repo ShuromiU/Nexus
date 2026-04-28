@@ -9,6 +9,7 @@ import type { LanguageCapabilities } from '../analysis/languages/registry.js';
 import { extractSource } from '../analysis/extractor.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
+import { diffDocAgainstSignature } from './stale-docs.js';
 import { classifyPath, classifyTestPath } from '../workspace/classify.js';
 import {
   loadPackageJson, loadTsconfig, loadGenericJson,
@@ -41,6 +42,7 @@ export type NexusResultType =
   | 'unused_exports'
   | 'private_dead'
   | 'tests_for'
+  | 'stale_docs'
   | 'kind_index'
   | 'doc'
   | 'batch'
@@ -292,6 +294,14 @@ export interface PrivateDeadResult {
   kind: string;
   line: number;
   end_line?: number;
+}
+
+export interface StaleDocResult {
+  file: string;
+  name: string;
+  kind: string;
+  line: number;
+  issues: { kind: 'unknown_param' | 'undocumented_param'; detail: string }[];
 }
 
 export interface TestsForResult {
@@ -1785,6 +1795,46 @@ export class QueryEngine {
     }
 
     return this.wrap('private_dead', query, results, start);
+  }
+
+  /**
+   * Stale-doc detection (B3 v1) — flag symbols whose `@param` tags don't
+   * agree with their actual signature. Pure post-hoc analysis; reuses the
+   * extractor's already-stored `doc` and `signature` columns. Composes
+   * `diffDocAgainstSignature` from `query/stale-docs.ts`.
+   *
+   * Skips symbols whose docstring has zero `@param` tags — fully
+   * undocumented things are not flagged here (different concern). Default
+   * kinds: `function`, `method`, `hook`, `component` (the kinds where
+   * @param matters).
+   */
+  staleDocs(opts?: { path?: string; kinds?: string[]; limit?: number }): NexusResult<StaleDocResult> {
+    const start = performance.now();
+    const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 500);
+    const kindSuffix = opts?.kinds?.length ? ` --kinds ${opts.kinds.join(',')}` : '';
+    const query = `stale_docs${opts?.path ? ` --path ${opts.path}` : ''}${kindSuffix}`;
+
+    const candidates = this.store.getDocumentedSymbols({
+      ...(opts?.path ? { pathPrefix: opts.path } : {}),
+      ...(opts?.kinds ? { kinds: opts.kinds } : {}),
+    });
+    const results: StaleDocResult[] = [];
+
+    for (const sym of candidates) {
+      if (results.length >= limit) break;
+      if (!sym.doc || !sym.signature) continue;
+      const issues = diffDocAgainstSignature(sym.doc, sym.signature);
+      if (issues.length === 0) continue;
+      results.push({
+        file: sym.file_path,
+        name: sym.name,
+        kind: sym.kind,
+        line: sym.line,
+        issues,
+      });
+    }
+
+    return this.wrap('stale_docs', query, results, start);
   }
 
   /**

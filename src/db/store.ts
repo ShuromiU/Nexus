@@ -1122,6 +1122,37 @@ export class NexusStore {
   }
 
   /**
+   * Symbols that have BOTH a doc and a signature — input set for B3
+   * stale-doc detection. Optional path prefix and kind filter (the latter
+   * defaults to function-like kinds that meaningfully have @param tags).
+   */
+  getDocumentedSymbols(opts?: {
+    pathPrefix?: string;
+    kinds?: string[];
+  }): SymbolWithFile[] {
+    const kinds = opts?.kinds ?? ['function', 'method', 'hook', 'component'];
+    const placeholders = kinds.map(() => '?').join(',');
+    const params: unknown[] = [...kinds];
+
+    let pathClause = '';
+    if (opts?.pathPrefix) {
+      pathClause = ' AND f.path LIKE ?';
+      params.push(`${opts.pathPrefix}%`);
+    }
+
+    const sql = `
+      SELECT s.*, f.path AS file_path, f.language AS file_language
+      FROM symbols s
+      JOIN files f ON s.file_id = f.id
+      WHERE s.doc IS NOT NULL
+        AND s.signature IS NOT NULL
+        AND s.kind IN (${placeholders})
+        ${pathClause}
+      ORDER BY f.path, s.line, s.col`;
+    return this.db.prepare(sql).all(...params) as SymbolWithFile[];
+  }
+
+  /**
    * List symbols of a kind, optionally restricted to files under a path prefix.
    */
   getSymbolsByKindAndPath(kind: string, pathPrefix?: string): SymbolWithFile[] {
