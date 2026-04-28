@@ -12,6 +12,7 @@ import { scanDirectory } from '../workspace/scanner.js';
 import { detectChanges, summarizeChanges, readAndHash } from '../workspace/changes.js';
 import type { FileChange } from '../workspace/changes.js';
 import { extractFile, extractSource } from '../analysis/extractor.js';
+import type { ExtractedRelationEdge } from '../analysis/languages/registry.js';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ interface FileBuffer {
   symbols: Omit<SymbolRow, 'id' | 'file_id'>[];
   edges: Omit<ModuleEdgeRow, 'id' | 'file_id' | 'symbol_id' | 'resolved_file_id'>[];
   occurrences: Omit<OccurrenceRow, 'id' | 'file_id'>[];
+  relations: ExtractedRelationEdge[];
 }
 
 // ── Orchestrator ────────────────────────────────────────────────────────
@@ -184,8 +186,9 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
       for (const buf of [...addBuffers, ...updateBuffers]) {
         const fileId = store.insertFile(buf.fileRow);
 
+        let symbolIds: number[] = [];
         if (buf.symbols.length > 0) {
-          store.insertSymbols(
+          symbolIds = store.insertSymbols(
             buf.symbols.map(s => ({ ...s, file_id: fileId })),
           );
         }
@@ -204,6 +207,31 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
             buf.occurrences.map(o => ({ ...o, file_id: fileId })),
           );
         }
+        if (buf.relations.length > 0) {
+          // Build same-file lookup: name → first matching top-level type id.
+          // Only class/interface/type kinds are valid relation targets.
+          const localTargetByName = new Map<string, number>();
+          for (let i = 0; i < buf.symbols.length; i++) {
+            const s = buf.symbols[i];
+            if (s.kind === 'class' || s.kind === 'interface' || s.kind === 'type') {
+              if (!localTargetByName.has(s.name)) {
+                localTargetByName.set(s.name, symbolIds[i]);
+              }
+            }
+          }
+          const rows = buf.relations
+            .filter(r => r.source_symbol_index >= 0 && r.source_symbol_index < symbolIds.length)
+            .map(r => ({
+              file_id: fileId,
+              source_id: symbolIds[r.source_symbol_index],
+              kind: r.kind,
+              target_name: r.target_name,
+              target_id: localTargetByName.get(r.target_name) ?? null,
+              confidence: r.confidence,
+              line: r.line,
+            }));
+          if (rows.length > 0) store.insertRelationEdges(rows);
+        }
       }
 
       // Update mtime/size for hash_only changes
@@ -221,6 +249,11 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
 
     // ── Phase 3: Resolve Import Edges ─────────────────────────────────
     resolveImportEdges(store, caseSensitive);
+
+    // ── Phase 4: Resolve Relation Edge Targets (B2 v1) ─────────────────
+    // Runs after Phase 3 so import resolution is available — relations
+    // whose target_name was imported get linked to the export's declaration.
+    resolveRelationTargets(store);
 
     // Finalize index run
     const filesIndexed = addBuffers.length + updateBuffers.length;
@@ -311,6 +344,7 @@ function extractAndBuffer(
       symbols: [],
       edges: [],
       occurrences: [],
+      relations: [],
     };
   }
 
@@ -329,6 +363,7 @@ function extractAndBuffer(
     symbols: result.symbols,
     edges: result.edges,
     occurrences: result.occurrences,
+    relations: result.relations ?? [],
   };
 }
 
@@ -336,6 +371,80 @@ function extractAndBuffer(
  * Phase 3: Resolve relative import specifiers to file IDs.
  * Looks up './utils' → files table path_key match for actual indexed file.
  */
+/**
+ * B2 v1: resolve relation_edges.target_id by looking up the target_name
+ * in the importer's resolved imports, then in the imported file's
+ * top-level class/interface/type symbols.
+ *
+ * Handles three patterns:
+ *   class B extends Base       — bare identifier; matches import alias.
+ *   class B extends ns.Base    — member expression; matches namespace import.
+ *   class B implements IUser   — same as bare identifier.
+ *
+ * Skips call expressions (`Mixin(Base)`) — they remain unresolved.
+ */
+function resolveRelationTargets(store: NexusStore): void {
+  const unresolved = store.getUnresolvedRelationEdges();
+  if (unresolved.length === 0) return;
+
+  // Group by file to amortize per-file import lookups.
+  const byFile = new Map<number, typeof unresolved>();
+  for (const e of unresolved) {
+    const list = byFile.get(e.file_id);
+    if (list) list.push(e);
+    else byFile.set(e.file_id, [e]);
+  }
+
+  for (const [fileId, edges] of byFile) {
+    const imports = store.getImportsByFileId(fileId);
+    if (imports.length === 0) continue;
+
+    // alias-or-name → import row (first wins; collisions are rare and
+    // only matter at the syntactic level).
+    const namedImports = new Map<string, typeof imports[number]>();
+    const starImports = new Map<string, typeof imports[number]>();
+    for (const imp of imports) {
+      if (imp.is_star && imp.alias) {
+        starImports.set(imp.alias, imp);
+      } else {
+        const local = imp.alias ?? imp.name;
+        if (local && !namedImports.has(local)) namedImports.set(local, imp);
+      }
+    }
+
+    for (const edge of edges) {
+      const dotIdx = edge.target_name.indexOf('.');
+      let importRow: typeof imports[number] | undefined;
+      let exportName: string;
+
+      if (dotIdx > 0) {
+        // ns.Name → look up star import "ns", then symbol "Name" in target file.
+        const ns = edge.target_name.slice(0, dotIdx);
+        const tail = edge.target_name.slice(dotIdx + 1);
+        if (tail.includes('.')) continue; // multi-dot unsupported v1
+        importRow = starImports.get(ns);
+        exportName = tail;
+      } else if (/^[A-Za-z_$][\w$]*$/.test(edge.target_name)) {
+        // Bare identifier → look up named import (alias or original).
+        importRow = namedImports.get(edge.target_name);
+        // Original export name = import row's `name` field
+        // (e.g. `import { Foo as Bar }` → name='Foo', alias='Bar').
+        exportName = importRow?.name ?? edge.target_name;
+      } else {
+        // Call expression / unsupported syntax — skip.
+        continue;
+      }
+
+      if (!importRow || importRow.resolved_file_id == null) continue;
+
+      const targetId = store.findTopLevelTypeByFileAndName(importRow.resolved_file_id, exportName);
+      if (targetId !== null) {
+        store.updateRelationTargetId(edge.id, targetId);
+      }
+    }
+  }
+}
+
 function resolveImportEdges(store: NexusStore, caseSensitive: boolean): void {
   const unresolvedEdges = store.getUnresolvedRelativeEdges();
   if (unresolvedEdges.length === 0) return;
@@ -404,11 +513,25 @@ function resolveModulePath(
   }
   const basePath = resolved.join('/');
 
-  for (const ext of RESOLVE_EXTENSIONS) {
-    const candidate = basePath + ext;
-    const key = caseSensitive ? candidate : candidate.toLowerCase();
-    const fileId = fileByPathKey.get(key);
-    if (fileId !== undefined) return fileId;
+  // TS-ESM imports use .js extensions referring to .ts source files
+  // (`import { X } from './foo.js'` → ./foo.ts). Try the source-extension
+  // variants first when the specifier ends in a JS extension.
+  const baseVariants = [basePath];
+  const jsExtMatch = basePath.match(/\.(js|jsx|mjs|cjs)$/);
+  if (jsExtMatch) {
+    const stripped = basePath.slice(0, -jsExtMatch[0].length);
+    const tsExt = jsExtMatch[1] === 'jsx' ? '.tsx' : (jsExtMatch[1] === 'mjs' ? '.mts' : (jsExtMatch[1] === 'cjs' ? '.cts' : '.ts'));
+    baseVariants.unshift(stripped + tsExt);
+    baseVariants.unshift(stripped); // also try without extension (e.g. for /index.ts lookup)
+  }
+
+  for (const candidateBase of baseVariants) {
+    for (const ext of RESOLVE_EXTENSIONS) {
+      const candidate = candidateBase + ext;
+      const key = caseSensitive ? candidate : candidate.toLowerCase();
+      const fileId = fileByPathKey.get(key);
+      if (fileId !== undefined) return fileId;
+    }
   }
 
   return undefined;

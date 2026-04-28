@@ -272,6 +272,7 @@ const goAdapter: LanguageAdapter = {
     docstrings: true,
     signatures: true,
     refKinds: [],
+    relationKinds: [],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
@@ -280,6 +281,7 @@ const goAdapter: LanguageAdapter = {
       symbols,
       edges: extractEdges(root, symbols),
       occurrences: extractOccurrences(root, source),
+      relations: [],
     };
   },
 };

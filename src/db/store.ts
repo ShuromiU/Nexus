@@ -54,6 +54,45 @@ export interface OccurrenceRow {
   ref_kind?: string | null;
 }
 
+/**
+ * Joined relation_edge row — fully expanded with source/target symbol +
+ * file info. Used by query layer; not a storage shape.
+ */
+export interface RelationJoinedRow {
+  id: number;
+  kind: string;
+  target_name: string;
+  line: number;
+  confidence: string;
+  source_id: number;
+  source_name: string;
+  source_kind: string;
+  source_line: number;
+  source_file: string;
+  target_id: number | null;
+  target_resolved_name: string | null;
+  target_kind: string | null;
+  target_line: number | null;
+  target_file: string | null;
+}
+
+/**
+ * B2 v1: declared structural relationships between symbols.
+ * `source_id` always resolves (declaring symbol — same ExtractionResult).
+ * `target_id` may be null (unresolved import, dynamic mixin, cross-boundary).
+ * `confidence` reserved for future 'derived' edges; v1 only writes 'declared'.
+ */
+export interface RelationEdgeRow {
+  id?: number;
+  file_id: number;
+  source_id: number;
+  kind: string;
+  target_name: string;
+  target_id?: number | null;
+  confidence: string;
+  line: number;
+}
+
 export interface IndexRunRow {
   id?: number;
   started_at: string;
@@ -352,27 +391,147 @@ export class NexusStore {
     return Number(result.lastInsertRowid);
   }
 
-  insertSymbols(symbols: SymbolRow[]): void {
+  /**
+   * Insert symbol rows; returns the inserted ids in input order.
+   * The caller wraps in a transaction (orchestrator does this).
+   */
+  insertSymbols(symbols: SymbolRow[]): number[] {
     const stmt = this.db.prepare(
       `INSERT INTO symbols (file_id, name, kind, line, col, end_line, signature, scope, doc)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    const insertMany = this.db.transaction((rows: SymbolRow[]) => {
-      for (const s of rows) {
-        stmt.run(
-          s.file_id,
-          s.name,
-          s.kind,
-          s.line,
-          s.col,
-          s.end_line ?? null,
-          s.signature ?? null,
-          s.scope ?? null,
-          s.doc ?? null,
-        );
-      }
-    });
-    insertMany(symbols);
+    const ids: number[] = [];
+    for (const s of symbols) {
+      const r = stmt.run(
+        s.file_id,
+        s.name,
+        s.kind,
+        s.line,
+        s.col,
+        s.end_line ?? null,
+        s.signature ?? null,
+        s.scope ?? null,
+        s.doc ?? null,
+      );
+      ids.push(Number(r.lastInsertRowid));
+    }
+    return ids;
+  }
+
+  insertRelationEdges(rows: { file_id: number; source_id: number; kind: string;
+                              target_name: string; target_id: number | null;
+                              confidence: string; line: number }[]): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO relation_edges (file_id, source_id, kind, target_name, target_id, confidence, line)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const r of rows) {
+      stmt.run(r.file_id, r.source_id, r.kind, r.target_name, r.target_id, r.confidence, r.line);
+    }
+  }
+
+  /**
+   * Set target_id for a relation edge after-the-fact (used by cross-file
+   * resolution pass). NULL clears the link.
+   */
+  updateRelationTargetId(edgeId: number, targetId: number | null): void {
+    this.db.prepare('UPDATE relation_edges SET target_id = ? WHERE id = ?').run(targetId, edgeId);
+  }
+
+  /** Edges whose target_id is still unresolved — used by cross-file resolver. */
+  getUnresolvedRelationEdges(): { id: number; file_id: number; target_name: string; kind: string }[] {
+    return this.db.prepare(
+      'SELECT id, file_id, target_name, kind FROM relation_edges WHERE target_id IS NULL'
+    ).all() as { id: number; file_id: number; target_name: string; kind: string }[];
+  }
+
+  /**
+   * Find a top-level class/interface/type symbol by file + name. Used by
+   * cross-file relation resolution: given an imported name, find the symbol
+   * declaration in the importer's source file.
+   */
+  findTopLevelTypeByFileAndName(fileId: number, name: string): number | null {
+    const row = this.db.prepare(
+      `SELECT id FROM symbols
+       WHERE file_id = ? AND name = ? AND kind IN ('class', 'interface', 'type')
+       AND (scope IS NULL OR scope = '')
+       ORDER BY id ASC LIMIT 1`
+    ).get(fileId, name) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
+  // ── Relation edges queries (B2 v1) ──────────────────────────────────
+
+  /**
+   * Edges declared by a symbol — i.e., what does `name` extend or implement?
+   * Joins source/target symbols + files for ergonomic display.
+   */
+  getRelationsBySource(name: string, kind?: string): RelationJoinedRow[] {
+    const params: unknown[] = [name];
+    let sql = `
+      SELECT
+        r.id AS id,
+        r.kind AS kind,
+        r.target_name AS target_name,
+        r.line AS line,
+        r.confidence AS confidence,
+        ss.id AS source_id,
+        ss.name AS source_name,
+        ss.kind AS source_kind,
+        ss.line AS source_line,
+        sf.path AS source_file,
+        ts.id AS target_id,
+        ts.name AS target_resolved_name,
+        ts.kind AS target_kind,
+        ts.line AS target_line,
+        tf.path AS target_file
+      FROM relation_edges r
+      JOIN symbols ss ON r.source_id = ss.id
+      JOIN files sf ON ss.file_id = sf.id
+      LEFT JOIN symbols ts ON r.target_id = ts.id
+      LEFT JOIN files tf ON ts.file_id = tf.id
+      WHERE ss.name = ?
+    `;
+    if (kind) { sql += ' AND r.kind = ?'; params.push(kind); }
+    sql += ' ORDER BY sf.path, r.line';
+    return this.db.prepare(sql).all(...params) as RelationJoinedRow[];
+  }
+
+  /**
+   * Edges that target a symbol — i.e., who extends or implements `name`?
+   * Matches by either resolved target_id (joined back through symbols) or
+   * by target_name (covers unresolved cross-boundary targets).
+   */
+  getRelationsByTarget(name: string, kind?: string): RelationJoinedRow[] {
+    const params: unknown[] = [name, name];
+    let sql = `
+      SELECT
+        r.id AS id,
+        r.kind AS kind,
+        r.target_name AS target_name,
+        r.line AS line,
+        r.confidence AS confidence,
+        ss.id AS source_id,
+        ss.name AS source_name,
+        ss.kind AS source_kind,
+        ss.line AS source_line,
+        sf.path AS source_file,
+        ts.id AS target_id,
+        ts.name AS target_resolved_name,
+        ts.kind AS target_kind,
+        ts.line AS target_line,
+        tf.path AS target_file
+      FROM relation_edges r
+      JOIN symbols ss ON r.source_id = ss.id
+      JOIN files sf ON ss.file_id = sf.id
+      LEFT JOIN symbols ts ON r.target_id = ts.id
+      LEFT JOIN files tf ON ts.file_id = tf.id
+      WHERE (ts.name = ? OR (ts.name IS NULL AND r.target_name = ?))
+    `;
+    if (kind) { sql += ' AND r.kind = ?'; params.push(kind); }
+    sql += ' ORDER BY sf.path, r.line';
+    return this.db.prepare(sql).all(...params) as RelationJoinedRow[];
   }
 
   getSymbolsByName(name: string): (SymbolRow & { id: number })[] {

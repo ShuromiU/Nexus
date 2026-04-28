@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { SymbolRow, ModuleEdgeRow, OccurrenceRow } from '../../db/store.js';
+import type { SymbolRow, ModuleEdgeRow, OccurrenceRow, RelationEdgeRow } from '../../db/store.js';
 
 /**
  * What a language adapter can extract.
@@ -20,6 +20,27 @@ export interface LanguageCapabilities {
    * unless it appears here.
    */
   refKinds: string[];
+  /**
+   * The set of relation_edge kinds this adapter emits (B2 v1).
+   * Empty array means the adapter does not extract structural relationships.
+   * Possible values: 'extends_class', 'implements', 'extends_interface'.
+   */
+  relationKinds: string[];
+}
+
+/**
+ * Relation edge as produced by an extractor — uses `source_symbol_index`
+ * (an index into the same ExtractionResult's `symbols` array) rather than
+ * `source_id`, since symbol ids are not yet known at extraction time.
+ * The orchestrator backfills `source_id` after symbol insert.
+ * `target_id` is always null at extraction time; resolution is a separate pass.
+ */
+export interface ExtractedRelationEdge {
+  source_symbol_index: number;
+  kind: string;
+  target_name: string;
+  confidence: string;
+  line: number;
 }
 
 /**
@@ -30,6 +51,7 @@ export interface ExtractionResult {
   symbols: Omit<SymbolRow, 'id' | 'file_id'>[];
   edges: Omit<ModuleEdgeRow, 'id' | 'file_id' | 'symbol_id' | 'resolved_file_id'>[];
   occurrences: Omit<OccurrenceRow, 'id' | 'file_id'>[];
+  relations: ExtractedRelationEdge[];
 }
 
 /**

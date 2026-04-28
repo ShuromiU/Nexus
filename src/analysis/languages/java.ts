@@ -304,6 +304,7 @@ const javaAdapter: LanguageAdapter = {
     docstrings: true,
     signatures: true,
     refKinds: [],
+    relationKinds: [],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
@@ -312,6 +313,7 @@ const javaAdapter: LanguageAdapter = {
       symbols,
       edges: extractEdges(root, symbols),
       occurrences: extractOccurrences(root, source),
+      relations: [],
     };
   },
 };

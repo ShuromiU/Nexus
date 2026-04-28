@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 2;
-export const EXTRACTOR_VERSION = 3;
+export const SCHEMA_VERSION = 3;
+export const EXTRACTOR_VERSION = 4;
 
 const TABLES = `
 -- Metadata (version tracking, invalidation, filesystem info)
@@ -87,6 +87,21 @@ CREATE TABLE IF NOT EXISTS occurrences (
   confidence TEXT NOT NULL DEFAULT 'heuristic',
   ref_kind   TEXT
 );
+
+-- Declared structural relationships (extends, implements). B2 v1.
+-- source_id: declaring symbol (always resolves — same ExtractionResult).
+-- target_id: parent symbol (NULL when unresolved or cross-boundary).
+-- confidence reserved for future 'derived' edges; v1 only writes 'declared'.
+CREATE TABLE IF NOT EXISTS relation_edges (
+  id          INTEGER PRIMARY KEY,
+  file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  source_id   INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,
+  target_name TEXT NOT NULL,
+  target_id   INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+  confidence  TEXT NOT NULL DEFAULT 'declared',
+  line        INTEGER NOT NULL
+);
 `;
 
 const INDEXES = `
@@ -104,6 +119,11 @@ CREATE INDEX IF NOT EXISTS idx_occur_file        ON occurrences(file_id);
 CREATE INDEX IF NOT EXISTS idx_occur_name_refkind ON occurrences(name, ref_kind);
 CREATE INDEX IF NOT EXISTS idx_files_language    ON files(language);
 CREATE INDEX IF NOT EXISTS idx_files_status      ON files(status);
+CREATE INDEX IF NOT EXISTS idx_relation_edges_source      ON relation_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_relation_edges_target      ON relation_edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_relation_edges_target_name ON relation_edges(target_name);
+CREATE INDEX IF NOT EXISTS idx_relation_edges_kind        ON relation_edges(kind);
+CREATE INDEX IF NOT EXISTS idx_relation_edges_file        ON relation_edges(file_id);
 `;
 
 /**
@@ -183,6 +203,12 @@ function dropStaleTablesIfNeeded(db: Database.Database): void {
     DROP INDEX IF EXISTS idx_occur_name_refkind;
     DROP INDEX IF EXISTS idx_files_language;
     DROP INDEX IF EXISTS idx_files_status;
+    DROP INDEX IF EXISTS idx_relation_edges_source;
+    DROP INDEX IF EXISTS idx_relation_edges_target;
+    DROP INDEX IF EXISTS idx_relation_edges_target_name;
+    DROP INDEX IF EXISTS idx_relation_edges_kind;
+    DROP INDEX IF EXISTS idx_relation_edges_file;
+    DROP TABLE IF EXISTS relation_edges;
     DROP TABLE IF EXISTS occurrences;
     DROP TABLE IF EXISTS module_edges;
     DROP TABLE IF EXISTS symbols;

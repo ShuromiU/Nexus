@@ -511,6 +511,30 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_relations',
+          description: 'Declared structural relationships (B2 v1) — extends/implements edges. direction:"parents" answers "what does X extend/implement?", direction:"children" answers "who extends/implements X?". Replaces grep for "extends Foo" / "implements IUser" with a precise, AST-derived edge list. TypeScript only in v1; non-TS adapters report empty. Cross-file targets resolve via imports; unresolved targets carry resolved=false.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol name (class or interface) to query' },
+              direction: {
+                type: 'string',
+                enum: ['parents', 'children', 'both'],
+                description: 'parents (default): what does name extend/implement? children: who extends/implements name? both: union.',
+              },
+              kind: {
+                type: 'string',
+                enum: ['extends_class', 'implements', 'extends_interface'],
+                description: 'Optional filter to one edge kind',
+              },
+              depth: { type: 'number', description: 'Recursion depth 1-5, default 1. Cycle-safe.' },
+              limit: { type: 'number', description: 'Max edges in response (default 200, max 500)' },
+              ...COMPACT_PROP,
+            },
+            required: ['name'],
+          },
+        },
+        {
           name: 'nexus_kind_index',
           description: 'List every symbol of a given kind (interface, class, component, hook, etc.) under an optional path prefix. Replaces grep/search chains for "show me every <kind> in this folder".',
           inputSchema: {
@@ -733,6 +757,13 @@ export function createMcpServer(): Server {
           path: args.path as string | undefined,
           limit: args.limit as number | undefined,
           mode: args.mode as 'default' | 'runtime_only' | undefined,
+        });
+      case 'nexus_relations':
+        return qe.relations(args.name as string, {
+          direction: args.direction as 'parents' | 'children' | 'both' | undefined,
+          kind: args.kind as string | undefined,
+          depth: args.depth as number | undefined,
+          limit: args.limit as number | undefined,
         });
       case 'nexus_kind_index':
         return qe.kindIndex(args.kind as string, {

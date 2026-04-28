@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import { NexusStore } from '../db/store.js';
-import type { SymbolRow, FileRow, ModuleEdgeRow, SymbolWithFile, OccurrenceWithFile, ImportEdgeWithFile } from '../db/store.js';
+import type { SymbolRow, FileRow, ModuleEdgeRow, SymbolWithFile, OccurrenceWithFile, ImportEdgeWithFile, RelationJoinedRow } from '../db/store.js';
 import { getAllAdapters } from '../analysis/languages/registry.js';
 import type { LanguageCapabilities } from '../analysis/languages/registry.js';
 import { extractSource } from '../analysis/extractor.js';
@@ -45,6 +45,7 @@ export type NexusResultType =
   | 'structured_query'
   | 'structured_outline'
   | 'lockfile_deps'
+  | 'relations'
   | 'policy_check';
 
 export interface NexusResult<T> {
@@ -333,6 +334,28 @@ export interface LockfileDepsResult {
   error?: string;
   limit?: number;
   actual?: number;
+}
+
+export interface RelationEdgeResult {
+  source: { name: string; kind: string; file: string; line: number };
+  kind: string; // 'extends_class' | 'implements' | 'extends_interface'
+  target: {
+    name: string;
+    resolved_name?: string;
+    kind?: string;
+    file?: string;
+    line?: number;
+    resolved: boolean;
+  };
+  confidence: string;
+  line: number;
+  depth: number;
+}
+
+export interface RelationsResult {
+  query: { name: string; direction: string; kind?: string; depth: number };
+  results: RelationEdgeResult[];
+  count: number;
 }
 
 // ── Query Engine ──────────────────────────────────────────────────────
@@ -765,6 +788,7 @@ export class QueryEngine {
           docstrings: false,
           signatures: false,
           refKinds: [],
+          relationKinds: [],
         },
       };
     }
@@ -1526,6 +1550,85 @@ export class QueryEngine {
     }
 
     return this.wrap('unused_exports', query, results, start);
+  }
+
+  /**
+   * Declared structural relationships (B2 v1).
+   * `direction: 'parents'` — what does `name` extend or implement?
+   * `direction: 'children'` — who extends or implements `name`?
+   * `direction: 'both'` — union.
+   * `kind` filters to one edge kind.
+   * `depth` (1-5) recurses; cycle-safe via a visited set keyed on resolved id+kind.
+   */
+  relations(
+    name: string,
+    opts?: { direction?: 'parents' | 'children' | 'both'; kind?: string; depth?: number; limit?: number },
+  ): NexusResult<RelationsResult> {
+    const start = performance.now();
+    const direction = opts?.direction ?? 'parents';
+    const depth = Math.min(Math.max(opts?.depth ?? 1, 1), 5);
+    const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 500);
+    const queryText = `relations ${name} --direction ${direction}${opts?.kind ? ` --kind ${opts.kind}` : ''} --depth ${depth}`;
+
+    const out: RelationEdgeResult[] = [];
+    const visited = new Set<string>();
+    visited.add(name);
+
+    const fanout = (currentName: string, currentDepth: number): void => {
+      if (currentDepth > depth) return;
+      if (out.length >= limit) return;
+
+      let rows: RelationJoinedRow[] = [];
+      if (direction === 'parents' || direction === 'both') {
+        rows = rows.concat(this.store.getRelationsBySource(currentName, opts?.kind));
+      }
+      if (direction === 'children' || direction === 'both') {
+        rows = rows.concat(this.store.getRelationsByTarget(currentName, opts?.kind));
+      }
+
+      for (const row of rows) {
+        if (out.length >= limit) break;
+        const result: RelationEdgeResult = {
+          source: { name: row.source_name, kind: row.source_kind, file: row.source_file, line: row.source_line },
+          kind: row.kind,
+          target: {
+            name: row.target_name,
+            ...(row.target_resolved_name ? { resolved_name: row.target_resolved_name } : {}),
+            ...(row.target_kind ? { kind: row.target_kind } : {}),
+            ...(row.target_file ? { file: row.target_file } : {}),
+            ...(row.target_line !== null && row.target_line !== undefined ? { line: row.target_line } : {}),
+            resolved: row.target_id !== null,
+          },
+          confidence: row.confidence,
+          line: row.line,
+          depth: currentDepth,
+        };
+        out.push(result);
+
+        if (currentDepth < depth) {
+          // Walk further: parents → up via target name, children → down via source name.
+          let nextName: string | null = null;
+          if (direction === 'parents') {
+            nextName = row.target_resolved_name ?? row.target_name;
+          } else if (direction === 'children') {
+            nextName = row.source_name;
+          }
+          if (nextName && !visited.has(nextName)) {
+            visited.add(nextName);
+            fanout(nextName, currentDepth + 1);
+          }
+        }
+      }
+    };
+
+    fanout(name, 1);
+
+    const result: RelationsResult = {
+      query: { name, direction, ...(opts?.kind ? { kind: opts.kind } : {}), depth },
+      results: out,
+      count: out.length,
+    };
+    return this.wrap('relations', queryText, [result], start);
   }
 
   /**

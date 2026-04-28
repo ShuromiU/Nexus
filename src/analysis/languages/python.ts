@@ -355,6 +355,7 @@ const pythonAdapter: LanguageAdapter = {
     docstrings: true,
     signatures: true,
     refKinds: [],
+    relationKinds: [],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
@@ -362,6 +363,7 @@ const pythonAdapter: LanguageAdapter = {
       symbols: extractSymbols(root, source),
       edges: extractEdges(root),
       occurrences: extractOccurrences(root, source),
+      relations: [],
     };
   },
 };

@@ -9,10 +9,15 @@ import { openDatabase, applySchema } from '../db/schema.js';
 import { QueryEngine } from '../query/engine.js';
 import { repair } from '../db/integrity.js';
 import { detectRoot, detectCaseSensitivity, resolveRoot } from '../workspace/detector.js';
+import {
+  computeMetricsGate, formatMetricsGate, DEFAULT_THRESHOLDS,
+  type MetricsGateReport, type GateThresholds,
+} from '../policy/metrics-gate.js';
 import type {
   SymbolResult, OccurrenceResult, ModuleEdgeResult,
   TreeEntry, IndexStats, NexusResult, ImporterResult, GrepResult,
   OutlineResult, BatchOutlineResult, SourceResult, SliceResult, DepsResult,
+  RelationsResult,
 } from '../query/engine.js';
 
 // Side-effect: register all language adapters
@@ -158,6 +163,25 @@ function csvEscape(v: unknown): string {
   const s = String(v);
   if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
   return s;
+}
+
+function analyzeTelemetry(
+  rootDir: string,
+  sinceSpec: string | undefined,
+  thresholdOverrides: Partial<GateThresholds>,
+): MetricsGateReport | null {
+  const dbPath = path.join(rootDir, '.nexus', 'telemetry.db');
+  if (!fs.existsSync(dbPath)) return null;
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return computeMetricsGate(db, {
+      sinceMs: parseSince(sinceSpec),
+      sinceLabel: sinceSpec ?? '30d',
+      thresholds: thresholdOverrides,
+    });
+  } finally {
+    db.close();
+  }
 }
 
 function exportTelemetry(rootDir: string, sinceSpec: string | undefined, format: 'ndjson' | 'csv'): void {
@@ -453,6 +477,29 @@ function formatDeps(result: DepsResult): string {
   };
 
   formatNode(result.tree, 0, true, '  ');
+  return lines.join('\n');
+}
+
+function formatRelations(result: RelationsResult): string {
+  const lines: string[] = [];
+  const dirArrow = result.query.direction === 'children' ? '←' : (result.query.direction === 'both' ? '↔' : '→');
+  const kindFilter = result.query.kind ? ` (${result.query.kind})` : '';
+  lines.push(`  ${result.query.name} ${dirArrow}${kindFilter}  depth=${result.query.depth}`);
+  lines.push('');
+
+  if (result.results.length === 0) {
+    lines.push('  (no relations)');
+    return lines.join('\n');
+  }
+
+  for (const e of result.results) {
+    const indent = '  '.repeat(e.depth);
+    const arrow = `--${e.kind}-->`;
+    const targetTag = e.target.resolved
+      ? `${e.target.resolved_name ?? e.target.name}  ${e.target.file ?? ''}:${e.target.line ?? '?'}`
+      : `${e.target.name}  (unresolved)`;
+    lines.push(`${indent}${e.source.name} (${e.source.file}:${e.source.line}) ${arrow} ${targetTag}`);
+  }
   return lines.join('\n');
 }
 
@@ -1014,6 +1061,35 @@ export function createProgram(): Command {
     });
 
   program
+    .command('relations <name>')
+    .description('Declared structural relationships (extends, implements). TypeScript only in v1.')
+    .option('--direction <dir>', 'parents | children | both', 'parents')
+    .option('--kind <k>', 'extends_class | implements | extends_interface')
+    .option('--depth <n>', 'Recursion depth (1-5)', '1')
+    .option('-l, --limit <n>', 'Max edges', '200')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((name: string, opts: { direction?: string; kind?: string; depth: string; limit: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(workingRoot());
+      try {
+        const engine = new QueryEngine(db);
+        const direction = (opts.direction === 'children' || opts.direction === 'both') ? opts.direction : 'parents';
+        const result = engine.relations(name, {
+          direction: direction as 'parents' | 'children' | 'both',
+          kind: opts.kind,
+          depth: parseInt(opts.depth, 10) || 1,
+          limit: parseInt(opts.limit, 10) || 200,
+        });
+        if (opts.pretty) {
+          printJson(result, true);
+        } else {
+          printEnvelope(result, formatRelations(result.results[0]));
+        }
+      } finally {
+        db.close();
+      }
+    });
+
+  program
     .command('kind-index <kind>')
     .description('List all symbols of a given kind, optionally under a path prefix')
     .option('-p, --path <prefix>', 'Path prefix')
@@ -1122,6 +1198,52 @@ export function createProgram(): Command {
       }
       if (opts.json) console.log(JSON.stringify(stats));
       else console.log(formatTelemetryStats(stats));
+    });
+
+  telemetry
+    .command('analyze')
+    .description('Evaluate V4 metrics gate (latency + override-rate thresholds)')
+    .option('--since <spec>', 'Time window: 30d, 7d, 1h', '30d')
+    .option('--json', 'Emit JSON')
+    .option('--p50-us <n>', 'Override p50 latency threshold (microseconds)')
+    .option('--p95-us <n>', 'Override p95 latency threshold (microseconds)')
+    .option('--override-rate <f>', 'Override max acceptable override rate (0-1)')
+    .option('--min-events <n>', 'Min events per rule for a verdict (default 30)')
+    .option('--strict', 'Exit non-zero on warn or fail (default: only fail)')
+    .action((opts: {
+      since?: string; json?: boolean;
+      p50Us?: string; p95Us?: string; overrideRate?: string; minEvents?: string;
+      strict?: boolean;
+    }) => {
+      const root = detectRoot(workingRoot());
+      const overrides: Partial<GateThresholds> = {};
+      if (opts.p50Us !== undefined) overrides.p50_us = Number(opts.p50Us);
+      if (opts.p95Us !== undefined) overrides.p95_us = Number(opts.p95Us);
+      if (opts.overrideRate !== undefined) overrides.override_rate = Number(opts.overrideRate);
+      if (opts.minEvents !== undefined) overrides.min_events_per_rule = Number(opts.minEvents);
+
+      const report = analyzeTelemetry(root, opts.since, overrides);
+      if (!report) {
+        if (opts.json) {
+          console.log(JSON.stringify({
+            since: opts.since ?? '30d',
+            thresholds: { ...DEFAULT_THRESHOLDS, ...overrides },
+            total_events: 0,
+            rules: {},
+            overall: { verdict: 'insufficient_data', failing_rules: [], warning_rules: [] },
+            opt_outs: { transitions: 0 },
+          }));
+        } else {
+          console.log('telemetry analyze: no telemetry recorded');
+        }
+        return;
+      }
+      if (opts.json) console.log(JSON.stringify(report));
+      else console.log(formatMetricsGate(report));
+
+      if (report.overall.verdict === 'fail' || (opts.strict && report.overall.verdict === 'warn')) {
+        process.exitCode = 1;
+      }
     });
 
   telemetry

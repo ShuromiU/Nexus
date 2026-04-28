@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { LanguageAdapter, ExtractionResult } from './registry.js';
+import type { LanguageAdapter, ExtractionResult, ExtractedRelationEdge } from './registry.js';
 import { registerAdapter } from './registry.js';
 import type { SymbolRow, ModuleEdgeRow, OccurrenceRow } from '../../db/store.js';
 import { getParser as getParserForTest } from '../parser.js';
@@ -291,7 +291,8 @@ function extractSymbols(root: Parser.SyntaxNode, source: string): SymbolOut[] {
         break;
       }
 
-      case 'class_declaration': {
+      case 'class_declaration':
+      case 'abstract_class_declaration': {
         const nameNode = node.childForFieldName('name');
         if (nameNode) {
           symbols.push({
@@ -1065,6 +1066,139 @@ function hasChildToken(node: Parser.SyntaxNode, tokenText: string): boolean {
   return false;
 }
 
+// ── Relation edges (B2 v1) ──────────────────────────────────────────────
+
+/**
+ * Extract the textual target name from an expression that follows
+ * `extends` or `implements`. Strips type arguments (`Base<T>` → `Base`),
+ * preserves member-expression dotted names, returns full text for
+ * call expressions (mixin patterns) so users see what was written.
+ */
+function relationTargetText(node: Parser.SyntaxNode): string {
+  switch (node.type) {
+    case 'identifier':
+    case 'type_identifier':
+      return node.text;
+    case 'member_expression':
+    case 'nested_type_identifier':
+      return node.text;
+    case 'generic_type': {
+      const base = node.namedChild(0);
+      return base ? relationTargetText(base) : node.text;
+    }
+    case 'call_expression':
+      return node.text;
+    default:
+      return node.text;
+  }
+}
+
+/**
+ * Find the first non-keyword, non-type-arguments named child of an
+ * extends_clause / extends_type_clause. tree-sitter sometimes emits
+ * the keyword as a named child on TS grammars, so we filter explicitly.
+ */
+function clauseTargetExpressions(clause: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  const out: Parser.SyntaxNode[] = [];
+  for (let i = 0; i < clause.namedChildCount; i++) {
+    const child = clause.namedChild(i)!;
+    if (child.type === 'extends' || child.type === 'implements') continue;
+    if (child.type === 'type_arguments') continue;
+    out.push(child);
+  }
+  return out;
+}
+
+/**
+ * Look up the index of the symbol in the same ExtractionResult that
+ * declared a class/interface at `line` with the given `name`. Returns
+ * -1 if no match (extractor will skip the relation rather than emit
+ * a dangling source).
+ */
+function findSourceSymbolIndex(symbols: SymbolOut[], name: string, line: number): number {
+  for (let i = 0; i < symbols.length; i++) {
+    const s = symbols[i];
+    if (s.name === name && s.line === line && (s.kind === 'class' || s.kind === 'interface')) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function extractRelationEdges(root: Parser.SyntaxNode, symbols: SymbolOut[]): ExtractedRelationEdge[] {
+  const out: ExtractedRelationEdge[] = [];
+
+  function visit(node: Parser.SyntaxNode): void {
+    const isClass = node.type === 'class_declaration' || node.type === 'abstract_class_declaration';
+    const isInterface = node.type === 'interface_declaration';
+
+    if (isClass || isInterface) {
+      const nameNode = node.childForFieldName('name');
+      if (nameNode) {
+        const sourceName = nameNode.text;
+        const sourceLine = nameNode.startPosition.row + 1;
+        const sourceIdx = findSourceSymbolIndex(symbols, sourceName, sourceLine);
+
+        if (sourceIdx >= 0) {
+          // Class: walk class_heritage → extends_clause + implements_clause
+          if (isClass) {
+            for (let i = 0; i < node.namedChildCount; i++) {
+              const child = node.namedChild(i)!;
+              if (child.type !== 'class_heritage') continue;
+              for (let j = 0; j < child.namedChildCount; j++) {
+                const clause = child.namedChild(j)!;
+                if (clause.type === 'extends_clause') {
+                  for (const target of clauseTargetExpressions(clause)) {
+                    out.push({
+                      source_symbol_index: sourceIdx,
+                      kind: 'extends_class',
+                      target_name: relationTargetText(target),
+                      confidence: 'declared',
+                      line: clause.startPosition.row + 1,
+                    });
+                  }
+                } else if (clause.type === 'implements_clause') {
+                  for (const target of clauseTargetExpressions(clause)) {
+                    out.push({
+                      source_symbol_index: sourceIdx,
+                      kind: 'implements',
+                      target_name: relationTargetText(target),
+                      confidence: 'declared',
+                      line: clause.startPosition.row + 1,
+                    });
+                  }
+                }
+              }
+            }
+          } else {
+            // Interface: walk extends_type_clause directly
+            for (let i = 0; i < node.namedChildCount; i++) {
+              const clause = node.namedChild(i)!;
+              if (clause.type !== 'extends_type_clause') continue;
+              for (const target of clauseTargetExpressions(clause)) {
+                out.push({
+                  source_symbol_index: sourceIdx,
+                  kind: 'extends_interface',
+                  target_name: relationTargetText(target),
+                  confidence: 'declared',
+                  line: clause.startPosition.row + 1,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < node.namedChildCount; i++) {
+      visit(node.namedChild(i)!);
+    }
+  }
+
+  visit(root);
+  return out;
+}
+
 // ── Adapter Registration ────────────────────────────────────────────────
 
 const typescriptAdapter: LanguageAdapter = {
@@ -1079,13 +1213,16 @@ const typescriptAdapter: LanguageAdapter = {
     docstrings: true,
     signatures: true,
     refKinds: ['call', 'read', 'write', 'type-ref', 'declaration'],
+    relationKinds: ['extends_class', 'implements', 'extends_interface'],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
+    const symbols = extractSymbols(root, source);
     return {
-      symbols: extractSymbols(root, source),
+      symbols,
       edges: extractEdges(root),
       occurrences: extractOccurrences(root, source),
+      relations: extractRelationEdges(root, symbols),
     };
   },
 };

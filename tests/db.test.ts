@@ -718,9 +718,9 @@ describe('IndexLock', () => {
 });
 
 describe('schema v2 ref_kind', () => {
-  it('SCHEMA_VERSION is 2', async () => {
+  it('SCHEMA_VERSION is at least 2 (ref_kind landed in v2)', async () => {
     const { SCHEMA_VERSION } = await import('../src/db/schema.js');
-    expect(SCHEMA_VERSION).toBe(2);
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(2);
   });
 
   it('occurrences table has a nullable ref_kind column', () => {

@@ -106,6 +106,8 @@ TypeScript/JavaScript (.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs), Python, Go, Rust,
 
 **Structured files (A3):** `nexus_structured_query`, `nexus_structured_outline`, `nexus_lockfile_deps`
 
+**Relation intelligence (B2 v1):** `nexus_relations`
+
 Every tool accepts an optional `compact: true` flag that returns a minimal-key envelope (~50% smaller payload) — drops `query`/`timing_ms`/`index_status` and renames result keys to single letters.
 
 ### High-Token-Savings Tools
@@ -127,6 +129,9 @@ Every tool accepts an optional `compact: true` flag that returns a minimal-key e
 - **`nexus_unused_exports(path?, limit?)`** — Dead-code finder. Exports with no importers and no external occurrences. Note: re-exports through index.ts may appear unused; use `path` to scope.
   Supports `mode: 'default' | 'runtime_only'`. Default behavior unchanged; `runtime_only` excludes type-only imports and type-ref occurrences (TS/JS only).
 - **`nexus_kind_index(kind, path?, limit?)`** — Every symbol of a given kind (`interface`, `class`, `component`, `hook`, …) under an optional path prefix. Replaces grep/search chains for "show me every X in this folder".
+
+### Relation Intelligence (B2 v1)
+- **`nexus_relations(name, direction?, kind?, depth?, limit?)`** — Declared structural relationships: `extends_class`, `implements`, `extends_interface`. `direction: 'parents'` (default) answers "what does X extend/implement?", `'children'` answers "who extends/implements X?", `'both'` unions. `kind` filters to one edge kind. `depth` 1-5 (cycle-safe). TypeScript only in v1; non-TS adapters report `relationKinds: []`. Cross-file targets resolve through the importer's resolved imports + the target file's top-level type declarations; unresolved targets (external modules, mixins, dynamic) carry `target.resolved: false`. Source: [src/db/schema.ts](src/db/schema.ts) `relation_edges` table; storage: [src/db/store.ts](src/db/store.ts) joined query helpers; extractor: [src/analysis/languages/typescript.ts](src/analysis/languages/typescript.ts) `extractRelationEdges`. **Known v1 gaps:** structural-typing edges (object literal `LanguageAdapter` shapes implementing the interface implicitly) are not captured — declared `class X implements I` only. JS-side support and Java/C# adapters land in v1.5/v2. Method override edges land in v2.
 - **`nexus_doc(name, file?)`** — Just the docstring(s). Tiny but hot path — avoids reading source bodies when you only need the comment block.
 - **`nexus_batch(calls[])`** — Run several Nexus tools in a single MCP roundtrip. `calls` is an array of `{tool, args}`. Saves protocol/envelope overhead when you already know you need N related queries. Each sub-call's `args` may include its own `compact:true`; the top-level `compact:true` applies to all sub-results.
 
@@ -147,4 +152,6 @@ Shipped rules:
 
 The PostToolUse hook is installed separately as `hooks/nexus-post.sh` with matcher `"Bash"`; the PreToolUse install matcher widens to `"Grep|Glob|Agent|Read|Edit|Write|Bash"`.
 
-**Telemetry (D5):** every policy event is recorded to `.nexus/telemetry.db` (decision, rule, latency_us, session_id, canonical input_hash). Disabled via `NEXUS_TELEMETRY=0|false` (env, highest priority) or `.nexus.json {"telemetry": false}`; opt-in/opt-out transitions are themselves logged. Retention: 30 days OR 100k rows, pruned at startup (24h gate). CLI: `nexus telemetry stats|export|purge`. No MCP tool in v1; no network I/O ever.
+**Telemetry (D5):** every policy event is recorded to `.nexus/telemetry.db` (decision, rule, latency_us, session_id, canonical input_hash). Disabled via `NEXUS_TELEMETRY=0|false` (env, highest priority) or `.nexus.json {"telemetry": false}`; opt-in/opt-out transitions are themselves logged. Retention: 30 days OR 100k rows, pruned at startup (24h gate). CLI: `nexus telemetry stats|analyze|export|purge`. No MCP tool in v1; no network I/O ever.
+
+**V4 metrics gate** ([src/policy/metrics-gate.ts](src/policy/metrics-gate.ts)): `nexus telemetry analyze [--since 30d] [--json] [--strict]` evaluates the V3-roadmap thresholds (p50 ≤ 50ms, p95 ≤ 150ms, override_rate ≤ 10%, min 30 events/rule) per rule and emits an overall `pass | warn | fail | insufficient_data` verdict. Exits non-zero on `fail` (or `warn` under `--strict`) so it's CI-friendly. Latency breaches downgrade to `warn` only — override-rate breaches `fail` because the roadmap blocks V4 promotion on FP signal, not raw latency. Threshold flags: `--p50-us`, `--p95-us`, `--override-rate`, `--min-events`.

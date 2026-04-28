@@ -174,6 +174,22 @@ describe('MCP schemas surface new options', () => {
     expect(schema.properties).toHaveProperty('file');
     expect(schema.required).toEqual(['file']);
   });
+
+  it('registers nexus_relations with name + direction + kind + depth', async () => {
+    const tools = await getRegisteredTools();
+    const tool = tools.find(t => t.name === 'nexus_relations');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    expect(schema.properties).toHaveProperty('name');
+    expect(schema.properties).toHaveProperty('direction');
+    expect(schema.properties).toHaveProperty('kind');
+    expect(schema.properties).toHaveProperty('depth');
+    expect(schema.required).toEqual(['name']);
+    const dir = schema.properties!.direction as { enum?: string[] };
+    expect(dir.enum).toEqual(expect.arrayContaining(['parents', 'children', 'both']));
+    const k = schema.properties!.kind as { enum?: string[] };
+    expect(k.enum).toEqual(['extends_class', 'implements', 'extends_interface']);
+  });
 });
 
 // ── Response Shape Tests ──────────────────────────────────────────────
