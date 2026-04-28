@@ -116,7 +116,7 @@ describe('bucketRisk', () => {
 });
 
 describe('summarizeEditImpact', () => {
-  it('includes symbol, file, risk bucket, importer count, caller count, and the nexus_callers hint', async () => {
+  it('includes symbol, file, risk bucket, importer count, caller count, and the nexus_rename_safety hint', async () => {
     const { summarizeEditImpact, SUMMARY_MAX_CHARS } = await import('../src/policy/impact.js');
     const impact = {
       symbol: 'foo',
@@ -132,7 +132,7 @@ describe('summarizeEditImpact', () => {
     expect(s).toMatch(/medium/);
     expect(s).toMatch(/2 file/);
     expect(s).toMatch(/6 caller/);
-    expect(s).toMatch(/nexus_callers/);
+    expect(s).toMatch(/nexus_rename_safety/);
     expect(s.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
   });
 

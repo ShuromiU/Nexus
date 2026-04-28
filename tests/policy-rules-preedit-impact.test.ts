@@ -67,7 +67,7 @@ describe('preeditImpactRule — Edit path', () => {
     expect(d?.rule).toBe('preedit-impact');
     expect(d?.additional_context).toMatch(/foo/);
     expect(d?.additional_context).toMatch(/medium/);
-    expect(d?.additional_context).toMatch(/nexus_callers/);
+    expect(d?.additional_context).toMatch(/nexus_rename_safety/);
   });
 
   it('returns null when file has 0 importers', () => {
@@ -238,6 +238,109 @@ describe('preeditImpactRule — Edit path', () => {
       queryEngine: makeEngine(),
     };
     expect(preeditImpactRule.evaluate(ev('Edit', {}), ctx)).toBeNull();
+  });
+});
+
+describe('preeditImpactRule — B6 v1.5 rename-safety integration', () => {
+  it('upgrades risk to "high" when rename-safety reports children edges', () => {
+    const abs = writeFile(
+      'src/base.ts',
+      'export class Base {\n  hello() { return 1; }\n}\n',
+    );
+    const outline: OutlineForImpact = {
+      file: 'src/base.ts',
+      exports: ['Base'],
+      outline: [{ name: 'Base', kind: 'class', line: 1, end_line: 3 }],
+    };
+    const engine = makeEngine({
+      importers: () => ({ results: [{ file: 'src/sub.ts' }], count: 1 }),
+      outline: () => ({ results: [outline] }),
+      // Only 1 caller — bucketRisk would say "low".
+      callers: () => ({ results: [{ callers: [{ caller: { file: 'src/sub.ts' } }] }] }),
+      // But rename-safety sees 2 subclasses → forces high.
+      renameSafety: () => ({
+        results: [{
+          risk: 'high',
+          reasons: ['has_children:2', 'has_importers:1'],
+          blast_radius: 4,
+          relations: {
+            children: { count: 2, kinds: { extends_class: 2 } },
+            parents: { count: 0, kinds: {} },
+          },
+        }],
+      }),
+    });
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: engine,
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Edit', { file_path: abs, old_string: 'return 1;' }),
+      ctx,
+    );
+    expect(d).not.toBeNull();
+    // The advisory carries `risk: high` even though caller count is 1.
+    expect(d!.additional_context).toMatch(/risk: high/);
+    // Structural clause names the subclass count.
+    expect(d!.additional_context).toMatch(/2 subclass\/implementer/);
+    // Hint redirects to the new tool.
+    expect(d!.additional_context).toMatch(/nexus_rename_safety/);
+  });
+
+  it('falls back to legacy bucketRisk when renameSafety throws', () => {
+    const abs = writeFile('src/bar.ts', 'export function foo() { return 1; }\n');
+    const outline: OutlineForImpact = {
+      file: 'src/bar.ts',
+      exports: ['foo'],
+      outline: [{ name: 'foo', kind: 'function', line: 1, end_line: 1 }],
+    };
+    const engine = makeEngine({
+      importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      outline: () => ({ results: [outline] }),
+      callers: () => ({ results: [{ callers: new Array(15) }] }), // 15 → bucketRisk = high
+      renameSafety: () => { throw new Error('db unavailable'); },
+    });
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: engine,
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Edit', { file_path: abs, old_string: 'return 1;' }),
+      ctx,
+    );
+    expect(d).not.toBeNull();
+    // Legacy bucketRisk(15) → high.
+    expect(d!.additional_context).toMatch(/risk: high/);
+    // No structural clause in fallback path.
+    expect(d!.additional_context).not.toMatch(/subclass\/implementer/);
+  });
+
+  it('falls back to legacy bucketRisk when engine omits renameSafety entirely', () => {
+    const abs = writeFile('src/bar.ts', 'export function foo() { return 1; }\n');
+    const outline: OutlineForImpact = {
+      file: 'src/bar.ts',
+      exports: ['foo'],
+      outline: [{ name: 'foo', kind: 'function', line: 1, end_line: 1 }],
+    };
+    const engine = makeEngine({
+      importers: () => ({ results: [{ file: 'src/a.ts' }], count: 1 }),
+      outline: () => ({ results: [outline] }),
+      callers: () => ({ results: [{ callers: new Array(2) }] }), // bucketRisk = low
+      // renameSafety omitted entirely — verifies optional contract.
+    });
+    const ctx: PolicyContext = {
+      rootDir: tmpDir,
+      dbPath: path.join(tmpDir, '.nexus/index.db'),
+      queryEngine: engine,
+    };
+    const d = preeditImpactRule.evaluate(
+      ev('Edit', { file_path: abs, old_string: 'return 1;' }),
+      ctx,
+    );
+    expect(d).not.toBeNull();
+    expect(d!.additional_context).toMatch(/risk: low/);
   });
 });
 

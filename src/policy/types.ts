@@ -101,6 +101,27 @@ export interface QueryEngineLike {
   }): {
     results: { name: string; file: string; kind: string; line: number }[];
   };
+  /**
+   * B6 v1.5: composed rename-safety verdict. preedit-impact upgrades its
+   * crude `bucketRisk(callerCount)` to this when relation data is available
+   * (extends/implements children push the bucket to `high` independently of
+   * caller count). Optional so test stubs can omit it; the rule falls back
+   * to bucketRisk when undefined or when the call throws.
+   */
+  renameSafety?: (
+    name: string,
+    opts?: { file?: string; new_name?: string },
+  ) => {
+    results: {
+      risk: 'low' | 'medium' | 'high';
+      reasons: string[];
+      blast_radius: number;
+      relations: {
+        children: { count: number; kinds: Record<string, number> };
+        parents: { count: number; kinds: Record<string, number> };
+      };
+    }[];
+  };
 }
 
 export interface PolicyContext {

@@ -56,6 +56,14 @@ export interface EditImpact {
   importerCount: number;
   callerCount: number;
   risk: RiskBucket;
+  /**
+   * B6 v1.5: when relation data is available, surface the rename-safety
+   * driver (e.g. `has_children:2`, `has_importers:5`). Empty when the
+   * verdict came from the legacy `bucketRisk(callerCount)` path.
+   */
+  reasons?: string[];
+  /** Number of subclasses/implementers — non-zero pushes risk to `high`. */
+  childCount?: number;
 }
 
 export interface WriteImpact {
@@ -84,9 +92,17 @@ export function summarizeEditImpact(impact: EditImpact): string {
   }
 
   const callerClause = ` ${impact.callerCount} caller(s) found.`;
-  const hint = ` Run nexus_callers('${impact.symbol}') for the full list.`;
 
-  return capSummary(`${head}${importerClause}${callerClause}${hint}`);
+  // B6 v1.5: prepend a structural-risk clause when subclasses/implementers
+  // exist, since renaming a base class breaks them at a different layer than
+  // callers (cited reasons make the driver explicit).
+  let structuralClause = '';
+  if (impact.childCount && impact.childCount > 0) {
+    structuralClause = ` ${impact.childCount} subclass/implementer(s) depend on this type;`;
+  }
+
+  const hint = ` Run nexus_rename_safety('${impact.symbol}') for the full verdict.`;
+  return capSummary(`${head}${structuralClause}${importerClause}${callerClause}${hint}`);
 }
 
 /**

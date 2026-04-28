@@ -92,13 +92,35 @@ function evaluateEdit(
     callerCount = 0;
   }
 
+  // B6 v1.5: prefer rename-safety verdict when relations data is available.
+  // Falls back to legacy bucketRisk(callerCount) on any failure path or when
+  // the engine stub omits the optional renameSafety method.
+  let risk: RiskBucket = bucketRisk(callerCount);
+  let reasons: string[] | undefined;
+  let childCount: number | undefined;
+  if (engine.renameSafety) {
+    try {
+      const rsEnv = engine.renameSafety(match.name, { file: relPath });
+      const rs = rsEnv.results[0];
+      if (rs) {
+        risk = rs.risk;
+        reasons = rs.reasons;
+        childCount = rs.relations.children.count;
+      }
+    } catch {
+      /* fall through with legacy bucketRisk verdict */
+    }
+  }
+
   const impact: EditImpact = {
     symbol: match.name,
     file: relPath,
     importers: importers.results.map(r => r.file),
     importerCount: importers.count,
     callerCount,
-    risk: bucketRisk(callerCount),
+    risk,
+    ...(reasons ? { reasons } : {}),
+    ...(childCount !== undefined ? { childCount } : {}),
   };
 
   return {
@@ -145,7 +167,18 @@ function evaluateWrite(ctx: PolicyContext, relPath: string, absPath: string) {
     } catch {
       callerCount = 0;
     }
-    return { name: entry.name, callerCount, risk: bucketRisk(callerCount) };
+    // B6 v1.5: prefer rename-safety verdict when available.
+    let risk: RiskBucket = bucketRisk(callerCount);
+    if (engine.renameSafety) {
+      try {
+        const rsEnv = engine.renameSafety(entry.name, { file: relPath });
+        const rs = rsEnv.results[0];
+        if (rs) risk = rs.risk;
+      } catch {
+        /* fall through with legacy bucketRisk verdict */
+      }
+    }
+    return { name: entry.name, callerCount, risk };
   });
 
   const maxRisk = affectedSymbols.reduce<RiskBucket>(
