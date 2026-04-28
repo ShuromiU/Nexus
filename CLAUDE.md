@@ -97,7 +97,7 @@ TypeScript/JavaScript (.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs), Python, Go, Rust,
 
 ## MCP Tools
 
-**Core / discovery:** `nexus_find`, `nexus_refs`, `nexus_search`, `nexus_grep`, `nexus_exports`, `nexus_imports`, `nexus_importers`, `nexus_symbols`, `nexus_tree`, `nexus_stats`, `nexus_reindex`
+**Core / discovery:** `nexus_find`, `nexus_refs`, `nexus_search`, `nexus_grep`, `nexus_exports`, `nexus_imports`, `nexus_importers`, `nexus_symbols`, `nexus_tree`, `nexus_stats` (with optional `session: true` for D4 budget accountant), `nexus_reindex`
 - **`nexus_refs`** accepts `ref_kinds?: string[]` filter (TS/JS only) — e.g. `["call"]` to see only call sites, `["type-ref"]` for type usage. NULL ref_kind rows are returned only when the filter is absent.
 
 **High-savings:** `nexus_outline`, `nexus_source`, `nexus_slice`, `nexus_deps`
@@ -109,6 +109,8 @@ TypeScript/JavaScript (.ts/.tsx/.js/.jsx/.mts/.cts/.mjs/.cjs), Python, Go, Rust,
 **Relation intelligence (B2 v1/v2):** `nexus_relations` (TS/JS/Java/C# with `extends_class`, `implements`, `extends_interface`, `overrides_method`)
 
 **Composed workflows (B6, D2):** `nexus_rename_safety`, `nexus_refactor_preview`, `nexus_clarify`
+
+**Budget accountant (D4):** `nexus_stats { session: true, recent_limit?: number }` returns a per-process ring buffer of recent `pack()` calls plus a summary block (`pack_runs`, `total_tokens_used`, `total_budget_allocated`, `hit_budget_count`, `avg_utilization`, `total_timing_ms`). The ledger is in-memory — MCP servers (long-lived) accumulate across calls; CLI runs (one-shot) report a single-call session. Capacity defaults to 50 entries; oldest are overwritten. Source: [src/query/budget-ledger.ts](src/query/budget-ledger.ts) (pure, exported for unit testing).
 
 Every tool accepts an optional `compact: true` flag that returns a minimal-key envelope (~50% smaller payload) — drops `query`/`timing_ms`/`index_status` and renames result keys to single letters.
 

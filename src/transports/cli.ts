@@ -887,12 +887,22 @@ export function createProgram(): Command {
   program
     .command('stats')
     .description('Show index summary and per-language capabilities')
-    .action(() => {
+    .option('--session', 'Include the per-process budget accountant snapshot (D4)')
+    .option('--recent-limit <n>', 'Max recent pack() entries when --session is set', '10')
+    .option('--pretty', 'Pretty-print JSON instead of the human formatter')
+    .action((opts: { session?: boolean; recentLimit?: string; pretty?: boolean }) => {
       const { db } = openQueryDb(workingRoot());
       try {
         const engine = new QueryEngine(db);
-        const result = engine.stats();
-        printEnvelope(result, formatStats(result.results[0]));
+        const result = engine.stats({
+          ...(opts.session ? { session: true } : {}),
+          ...(opts.recentLimit ? { recent_limit: parseInt(opts.recentLimit, 10) || 10 } : {}),
+        });
+        if (opts.pretty || opts.session) {
+          printJson(result, !!opts.pretty);
+        } else {
+          printEnvelope(result, formatStats(result.results[0]));
+        }
       } finally {
         db.close();
       }

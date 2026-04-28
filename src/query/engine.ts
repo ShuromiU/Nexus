@@ -10,6 +10,8 @@ import { extractSource } from '../analysis/extractor.js';
 import { SCHEMA_VERSION, EXTRACTOR_VERSION } from '../db/schema.js';
 import { fuzzyScore, multiFieldScore, getSuggestions, rankResults } from './ranking.js';
 import { diffDocAgainstSignature } from './stale-docs.js';
+import { BudgetLedger } from './budget-ledger.js';
+import type { BudgetSummary, BudgetEntry } from './budget-ledger.js';
 import { classifyPath, classifyTestPath } from '../workspace/classify.js';
 import {
   loadPackageJson, loadTsconfig, loadGenericJson,
@@ -142,6 +144,12 @@ export interface IndexStats {
   last_indexed_at: string;
   schema_version: number;
   extractor_version: number;
+  /** Present only when `stats({ session: true })` is requested (D4). */
+  session?: {
+    summary: BudgetSummary;
+    recent: BudgetEntry[];
+    capacity: number;
+  };
 }
 
 export interface OutlineEntry {
@@ -568,17 +576,22 @@ export interface QueryEngineOptions {
    * worktree's checkout even when the index DB lives at the parent root.
    */
   sourceRoot?: string;
+  /** Inject a shared BudgetLedger (e.g. process-level) — defaults to a fresh per-engine one. */
+  budgetLedger?: BudgetLedger;
 }
 
 export class QueryEngine {
   private store: NexusStore;
   private db: Database.Database;
   private sourceRootOverride: string | null;
+  /** Per-session pack() ring buffer (D4). Surfaced via `stats({ session: true })`. */
+  readonly budgetLedger: BudgetLedger;
 
   constructor(db: Database.Database, opts: QueryEngineOptions = {}) {
     this.db = db;
     this.store = new NexusStore(db);
     this.sourceRootOverride = opts.sourceRoot ?? null;
+    this.budgetLedger = opts.budgetLedger ?? new BudgetLedger();
   }
 
   /**
@@ -953,9 +966,12 @@ export class QueryEngine {
   }
 
   /**
-   * Full index summary with per-language capabilities.
+   * Full index summary with per-language capabilities. When `opts.session`
+   * is true, also include the per-process budget-accountant snapshot (D4):
+   * a summary across recent pack() calls plus the recent entries
+   * themselves (capped by `recent_limit`, default 10, max 50).
    */
-  stats(): NexusResult<IndexStats> {
+  stats(opts?: { session?: boolean; recent_limit?: number }): NexusResult<IndexStats> {
     const start = performance.now();
 
     const fileCounts = this.store.getFileCount();
@@ -1001,6 +1017,15 @@ export class QueryEngine {
       schema_version: SCHEMA_VERSION,
       extractor_version: EXTRACTOR_VERSION,
     };
+
+    if (opts?.session) {
+      const recentLimit = Math.min(Math.max(opts.recent_limit ?? 10, 0), 50);
+      statsResult.session = {
+        summary: this.budgetLedger.summary(),
+        recent: this.budgetLedger.entries(recentLimit),
+        capacity: this.budgetLedger.capacity,
+      };
+    }
 
     return this.wrap('stats', 'stats', [statsResult], start);
   }
@@ -2535,7 +2560,17 @@ export class QueryEngine {
       included,
       skipped,
     };
-    return this.wrap('pack', queryStr, [result], start);
+    const wrapped = this.wrap('pack', queryStr, [result], start);
+    this.budgetLedger.record({
+      query: queryText,
+      budget_tokens: budget,
+      total_tokens: totalTokens,
+      included_count: included.length,
+      skipped_count: skipped.length,
+      timing_ms: wrapped.timing_ms,
+      timestamp: new Date().toISOString(),
+    });
+    return wrapped;
   }
 
   /**

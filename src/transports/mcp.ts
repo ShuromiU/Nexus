@@ -381,10 +381,14 @@ export function createMcpServer(): Server {
         },
         {
           name: 'nexus_stats',
-          description: 'Full index summary: file counts, symbol totals, per-language capabilities, index status and health.',
+          description: 'Full index summary: file counts, symbol totals, per-language capabilities, index status and health. With session:true, also returns the per-process budget accountant (D4) — pack() ring-buffer summary plus recent entries.',
           inputSchema: {
             type: 'object' as const,
-            properties: { ...COMPACT_PROP },
+            properties: {
+              session: { type: 'boolean', description: 'Include the per-process budget accountant (D4) snapshot.' },
+              recent_limit: { type: 'number', description: 'Max recent pack() entries to include (default 10, max 50). Only used when session:true.' },
+              ...COMPACT_PROP,
+            },
           },
         },
         {
@@ -815,7 +819,10 @@ export function createMcpServer(): Server {
       case 'nexus_deps':
         return qe.deps(args.file as string, args.direction as 'imports' | 'importers' | undefined, args.depth as number | undefined);
       case 'nexus_stats':
-        return qe.stats();
+        return qe.stats({
+          session: args.session as boolean | undefined,
+          recent_limit: args.recent_limit as number | undefined,
+        });
       case 'nexus_callers':
         return qe.callers(args.name as string, {
           file: args.file as string | undefined,
