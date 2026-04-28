@@ -505,6 +505,23 @@ export class NexusStore {
     return row?.id ?? null;
   }
 
+  /**
+   * Find a method symbol within a class by file + class scope + method name.
+   * Used by B2 v2 override-edge resolution. Returns the first match by id.
+   */
+  findMethodByFileScopeAndName(
+    fileId: number,
+    className: string,
+    methodName: string,
+  ): number | null {
+    const row = this.db.prepare(
+      `SELECT id FROM symbols
+       WHERE file_id = ? AND scope = ? AND name = ? AND kind = 'method'
+       ORDER BY id ASC LIMIT 1`,
+    ).get(fileId, className, methodName) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
   // ── Relation edges queries (B2 v1) ──────────────────────────────────
 
   /**

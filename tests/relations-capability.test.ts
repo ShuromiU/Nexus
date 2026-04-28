@@ -18,23 +18,43 @@ describe('LanguageCapabilities.relationKinds (T2)', () => {
     }
   });
 
-  it('TypeScript advertises extends_class, implements, extends_interface', () => {
+  it('TypeScript advertises extends_class, implements, extends_interface, overrides_method', () => {
     const ts = getAdapter('typescript');
     expect(ts).not.toBeNull();
     expect(ts!.capabilities.relationKinds).toEqual(
+      expect.arrayContaining([
+        'extends_class',
+        'implements',
+        'extends_interface',
+        'overrides_method',
+      ]),
+    );
+  });
+
+  it('JavaScript narrows to runtime-only kinds (extends_class, overrides_method)', () => {
+    const js = getAdapter('javascript');
+    expect(js).not.toBeNull();
+    expect(js!.capabilities.relationKinds).toEqual(['extends_class', 'overrides_method']);
+  });
+
+  it('Java declares structural relationKinds (B2 v2)', () => {
+    const java = getAdapter('java');
+    expect(java).not.toBeNull();
+    expect(java!.capabilities.relationKinds).toEqual(
       expect.arrayContaining(['extends_class', 'implements', 'extends_interface']),
     );
   });
 
-  it('JavaScript inherits the TypeScript adapter capability for now', () => {
-    const js = getAdapter('javascript');
-    expect(js).not.toBeNull();
-    // JS shares the TS adapter; v1.5 will narrow to ['extends_class'] only.
-    expect(js!.capabilities.relationKinds.length).toBeGreaterThan(0);
+  it('C# declares structural relationKinds (B2 v2)', () => {
+    const cs = getAdapter('csharp');
+    expect(cs).not.toBeNull();
+    expect(cs!.capabilities.relationKinds).toEqual(
+      expect.arrayContaining(['extends_class', 'implements', 'extends_interface']),
+    );
   });
 
-  it('non-TS adapters declare empty relationKinds', () => {
-    for (const lang of ['python', 'go', 'rust', 'java', 'csharp', 'css']) {
+  it('languages without B2 support declare empty relationKinds', () => {
+    for (const lang of ['python', 'go', 'rust', 'css']) {
       const a = getAdapter(lang);
       expect(a, `${lang} adapter should be registered`).not.toBeNull();
       expect(a!.capabilities.relationKinds, `${lang} relationKinds`).toEqual([]);

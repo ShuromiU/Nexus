@@ -35,8 +35,13 @@ describe('B2 v1.5 — JS adapter relation edges', () => {
   it('JS adapter capabilities narrow relationKinds to extends_class only', () => {
     const ts = getAdapter('typescript');
     const js = getAdapter('javascript');
-    expect(ts?.capabilities.relationKinds).toEqual(['extends_class', 'implements', 'extends_interface']);
-    expect(js?.capabilities.relationKinds).toEqual(['extends_class']);
+    expect(ts?.capabilities.relationKinds).toEqual([
+      'extends_class',
+      'implements',
+      'extends_interface',
+      'overrides_method',
+    ]);
+    expect(js?.capabilities.relationKinds).toEqual(['extends_class', 'overrides_method']);
   });
 
   it('extracts extends_class edges from a .js file (same-file)', () => {

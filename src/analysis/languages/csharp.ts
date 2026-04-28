@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { LanguageAdapter, ExtractionResult } from './registry.js';
+import type { LanguageAdapter, ExtractionResult, ExtractedRelationEdge } from './registry.js';
 import { registerAdapter } from './registry.js';
 import type { SymbolRow, ModuleEdgeRow, OccurrenceRow } from '../../db/store.js';
 
@@ -266,6 +266,118 @@ function extractEdges(root: Parser.SyntaxNode, symbols: SymbolOut[]): EdgeOut[] 
   return edges;
 }
 
+// ── Relation Edge Extraction (B2 v2) ────────────────────────────────────
+//
+// In C#, both class extension and interface implementation use the same
+// `base_list` syntax: `class Dog : Animal, IBark, IRun {}`. Tree-sitter does
+// not distinguish "the first item is a class, the rest are interfaces" at the
+// grammar level, so we use a heuristic: the first base is treated as a class
+// only when it is a bare type_identifier and not name-prefixed with `I` +
+// uppercase (the pervasive C# convention for interfaces). All names starting
+// with `I` followed by uppercase are emitted as `implements`. This is best-
+// effort — a class named `Identity` would be misclassified as an interface.
+
+function findSourceSymbolIndex(symbols: SymbolOut[], name: string, line: number): number {
+  for (let i = 0; i < symbols.length; i++) {
+    const s = symbols[i];
+    if (s.name === name && s.line === line && (s.kind === 'class' || s.kind === 'interface')) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function relationTargetText(node: Parser.SyntaxNode): string {
+  if (node.type === 'generic_name') {
+    const base = node.namedChild(0);
+    return base ? base.text : node.text;
+  }
+  if (node.type === 'qualified_name') {
+    return node.text;
+  }
+  return node.text;
+}
+
+function looksLikeInterfaceName(name: string): boolean {
+  // C# convention: interfaces start with `I` + uppercase letter.
+  return /^I[A-Z]/.test(name);
+}
+
+function extractRelationEdges(
+  root: Parser.SyntaxNode,
+  symbols: SymbolOut[],
+): ExtractedRelationEdge[] {
+  const out: ExtractedRelationEdge[] = [];
+
+  function visit(node: Parser.SyntaxNode): void {
+    if (node.type === 'class_declaration') {
+      const nameNode = node.childForFieldName('name');
+      if (nameNode) {
+        const sourceIdx = findSourceSymbolIndex(
+          symbols,
+          nameNode.text,
+          nameNode.startPosition.row + 1,
+        );
+        if (sourceIdx >= 0) {
+          const baseList = node.namedChildren.find(c => c.type === 'base_list');
+          if (baseList) {
+            // Collect target nodes (skip the leading `:` and any commas).
+            const targets: Parser.SyntaxNode[] = [];
+            for (let i = 0; i < baseList.namedChildCount; i++) {
+              targets.push(baseList.namedChild(i)!);
+            }
+            for (let i = 0; i < targets.length; i++) {
+              const target = targets[i];
+              const name = relationTargetText(target);
+              const isFirst = i === 0;
+              // First entry is the class base unless its name screams interface.
+              const isInterface = !isFirst || looksLikeInterfaceName(name);
+              out.push({
+                source_symbol_index: sourceIdx,
+                kind: isInterface ? 'implements' : 'extends_class',
+                target_name: name,
+                confidence: 'declared',
+                line: baseList.startPosition.row + 1,
+              });
+            }
+          }
+        }
+      }
+    } else if (node.type === 'interface_declaration') {
+      const nameNode = node.childForFieldName('name');
+      if (nameNode) {
+        const sourceIdx = findSourceSymbolIndex(
+          symbols,
+          nameNode.text,
+          nameNode.startPosition.row + 1,
+        );
+        if (sourceIdx >= 0) {
+          const baseList = node.namedChildren.find(c => c.type === 'base_list');
+          if (baseList) {
+            for (let i = 0; i < baseList.namedChildCount; i++) {
+              const target = baseList.namedChild(i)!;
+              out.push({
+                source_symbol_index: sourceIdx,
+                kind: 'extends_interface',
+                target_name: relationTargetText(target),
+                confidence: 'declared',
+                line: baseList.startPosition.row + 1,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < node.namedChildCount; i++) {
+      visit(node.namedChild(i)!);
+    }
+  }
+
+  visit(root);
+  return out;
+}
+
 // ── Occurrence Extraction ───────────────────────────────────────────────
 
 const CSHARP_KEYWORDS = new Set([
@@ -330,7 +442,7 @@ const csharpAdapter: LanguageAdapter = {
     docstrings: true,
     signatures: true,
     refKinds: [],
-    relationKinds: [],
+    relationKinds: ['extends_class', 'implements', 'extends_interface'],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
@@ -339,7 +451,7 @@ const csharpAdapter: LanguageAdapter = {
       symbols,
       edges: extractEdges(root, symbols),
       occurrences: extractOccurrences(root, source),
-      relations: [],
+      relations: extractRelationEdges(root, symbols),
     };
   },
 };

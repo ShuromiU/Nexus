@@ -1,5 +1,5 @@
 import type Parser from 'tree-sitter';
-import type { LanguageAdapter, ExtractionResult } from './registry.js';
+import type { LanguageAdapter, ExtractionResult, ExtractedRelationEdge } from './registry.js';
 import { registerAdapter } from './registry.js';
 import type { SymbolRow, ModuleEdgeRow, OccurrenceRow } from '../../db/store.js';
 
@@ -243,6 +243,125 @@ function extractEdges(root: Parser.SyntaxNode, symbols: SymbolOut[]): EdgeOut[] 
   return edges;
 }
 
+// ── Relation Edge Extraction (B2 v2) ────────────────────────────────────
+
+function findSourceSymbolIndex(symbols: SymbolOut[], name: string, line: number): number {
+  for (let i = 0; i < symbols.length; i++) {
+    const s = symbols[i];
+    if (s.name === name && s.line === line && (s.kind === 'class' || s.kind === 'interface')) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function relationTargetText(node: Parser.SyntaxNode): string {
+  // Strip generic parameters: `Foo<T>` → `Foo`. Java type_identifier
+  // appears bare; generic_type wraps it.
+  if (node.type === 'generic_type') {
+    const base = node.namedChild(0);
+    return base ? relationTargetText(base) : node.text;
+  }
+  if (node.type === 'scoped_type_identifier') {
+    return node.text;
+  }
+  return node.text;
+}
+
+function extractRelationEdges(
+  root: Parser.SyntaxNode,
+  symbols: SymbolOut[],
+): ExtractedRelationEdge[] {
+  const out: ExtractedRelationEdge[] = [];
+
+  function visit(node: Parser.SyntaxNode): void {
+    if (node.type === 'class_declaration') {
+      const nameNode = node.childForFieldName('name');
+      if (nameNode) {
+        const sourceIdx = findSourceSymbolIndex(
+          symbols,
+          nameNode.text,
+          nameNode.startPosition.row + 1,
+        );
+        if (sourceIdx >= 0) {
+          // Java: `extends Base` → superclass field
+          const superclass = node.childForFieldName('superclass');
+          if (superclass) {
+            for (let i = 0; i < superclass.namedChildCount; i++) {
+              const target = superclass.namedChild(i)!;
+              if (target.type === 'extends') continue;
+              out.push({
+                source_symbol_index: sourceIdx,
+                kind: 'extends_class',
+                target_name: relationTargetText(target),
+                confidence: 'declared',
+                line: superclass.startPosition.row + 1,
+              });
+            }
+          }
+          // Java: `implements I, J` → super_interfaces field
+          const interfaces = node.childForFieldName('interfaces');
+          if (interfaces) {
+            for (let i = 0; i < interfaces.namedChildCount; i++) {
+              const list = interfaces.namedChild(i)!;
+              if (list.type === 'type_list' || list.type === 'interface_type_list') {
+                for (let j = 0; j < list.namedChildCount; j++) {
+                  const target = list.namedChild(j)!;
+                  out.push({
+                    source_symbol_index: sourceIdx,
+                    kind: 'implements',
+                    target_name: relationTargetText(target),
+                    confidence: 'declared',
+                    line: interfaces.startPosition.row + 1,
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    } else if (node.type === 'interface_declaration') {
+      const nameNode = node.childForFieldName('name');
+      if (nameNode) {
+        const sourceIdx = findSourceSymbolIndex(
+          symbols,
+          nameNode.text,
+          nameNode.startPosition.row + 1,
+        );
+        if (sourceIdx >= 0) {
+          // Java: `interface I extends J, K` — the `extends_interfaces` clause
+          // is a regular named child (no field accessor), containing a type_list.
+          const extendsNode = node.namedChildren.find(c => c.type === 'extends_interfaces');
+          if (extendsNode) {
+            for (let i = 0; i < extendsNode.namedChildCount; i++) {
+              const list = extendsNode.namedChild(i)!;
+              if (list.type === 'type_list' || list.type === 'interface_type_list') {
+                for (let j = 0; j < list.namedChildCount; j++) {
+                  const target = list.namedChild(j)!;
+                  out.push({
+                    source_symbol_index: sourceIdx,
+                    kind: 'extends_interface',
+                    target_name: relationTargetText(target),
+                    confidence: 'declared',
+                    line: extendsNode.startPosition.row + 1,
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < node.namedChildCount; i++) {
+      visit(node.namedChild(i)!);
+    }
+  }
+
+  visit(root);
+  return out;
+}
+
 // ── Occurrence Extraction ───────────────────────────────────────────────
 
 const JAVA_KEYWORDS = new Set([
@@ -304,7 +423,7 @@ const javaAdapter: LanguageAdapter = {
     docstrings: true,
     signatures: true,
     refKinds: [],
-    relationKinds: [],
+    relationKinds: ['extends_class', 'implements', 'extends_interface'],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
@@ -313,7 +432,7 @@ const javaAdapter: LanguageAdapter = {
       symbols,
       edges: extractEdges(root, symbols),
       occurrences: extractOccurrences(root, source),
-      relations: [],
+      relations: extractRelationEdges(root, symbols),
     };
   },
 };

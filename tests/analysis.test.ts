@@ -86,7 +86,7 @@ describe('registry', () => {
       docstrings: true,
       signatures: true,
       refKinds: ['call', 'read', 'write', 'type-ref', 'declaration'],
-      relationKinds: ['extends_class', 'implements', 'extends_interface'],
+      relationKinds: ['extends_class', 'implements', 'extends_interface', 'overrides_method'],
     });
   });
 

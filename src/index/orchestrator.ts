@@ -211,11 +211,20 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
           // Build same-file lookup: name → first matching top-level type id.
           // Only class/interface/type kinds are valid relation targets.
           const localTargetByName = new Map<string, number>();
+          // For overrides_method (B2 v2): also build a (className.methodName)
+          // index → method symbol id, so same-file overrides resolve directly.
+          const localMethodByScopedName = new Map<string, number>();
           for (let i = 0; i < buf.symbols.length; i++) {
             const s = buf.symbols[i];
             if (s.kind === 'class' || s.kind === 'interface' || s.kind === 'type') {
               if (!localTargetByName.has(s.name)) {
                 localTargetByName.set(s.name, symbolIds[i]);
+              }
+            }
+            if (s.kind === 'method' && s.scope) {
+              const key = `${s.scope}.${s.name}`;
+              if (!localMethodByScopedName.has(key)) {
+                localMethodByScopedName.set(key, symbolIds[i]);
               }
             }
           }
@@ -226,7 +235,10 @@ export function runIndex(startDir?: string, forceRebuild = false): IndexResult {
               source_id: symbolIds[r.source_symbol_index],
               kind: r.kind,
               target_name: r.target_name,
-              target_id: localTargetByName.get(r.target_name) ?? null,
+              target_id:
+                r.kind === 'overrides_method'
+                  ? localMethodByScopedName.get(r.target_name) ?? null
+                  : localTargetByName.get(r.target_name) ?? null,
               confidence: r.confidence,
               line: r.line,
             }));
@@ -413,6 +425,35 @@ function resolveRelationTargets(store: NexusStore): void {
     }
 
     for (const edge of edges) {
+      // overrides_method has a special target_name format: ParentClass.method.
+      // The parent class lookup uses the same import-resolution machinery; the
+      // method is then found by (resolved_file_id, scope=parentClass, name=method).
+      if (edge.kind === 'overrides_method') {
+        const dotIdx = edge.target_name.indexOf('.');
+        if (dotIdx <= 0) continue;
+        const parentClass = edge.target_name.slice(0, dotIdx);
+        const methodName = edge.target_name.slice(dotIdx + 1);
+        if (methodName.includes('.')) continue;
+        const importRow = namedImports.get(parentClass);
+        if (!importRow || importRow.resolved_file_id == null) continue;
+        // The imported name in the target file may differ from the local name
+        // (e.g. `import { Foo as Bar }` makes parentClass="Bar", target export="Foo").
+        const exportName = importRow.name ?? parentClass;
+        // Verify the parent class actually exists in the target file before
+        // looking up the method (avoids false positives on namespace collisions).
+        const parentId = store.findTopLevelTypeByFileAndName(importRow.resolved_file_id, exportName);
+        if (parentId === null) continue;
+        const targetId = store.findMethodByFileScopeAndName(
+          importRow.resolved_file_id,
+          exportName,
+          methodName,
+        );
+        if (targetId !== null) {
+          store.updateRelationTargetId(edge.id, targetId);
+        }
+        continue;
+      }
+
       const dotIdx = edge.target_name.indexOf('.');
       let importRow: typeof imports[number] | undefined;
       let exportName: string;

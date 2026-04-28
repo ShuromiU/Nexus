@@ -1125,6 +1125,31 @@ function findSourceSymbolIndex(symbols: SymbolOut[], name: string, line: number)
   return -1;
 }
 
+/**
+ * Find the symbol index of a method `name` whose scope is `className`,
+ * declared at `line`. Used to back-link override edges to their declaring
+ * method symbol. Returns -1 when no match.
+ */
+function findMethodSymbolIndex(
+  symbols: SymbolOut[],
+  className: string,
+  methodName: string,
+  line: number,
+): number {
+  for (let i = 0; i < symbols.length; i++) {
+    const s = symbols[i];
+    if (
+      s.kind === 'method' &&
+      s.scope === className &&
+      s.name === methodName &&
+      s.line === line
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 function extractRelationEdges(root: Parser.SyntaxNode, symbols: SymbolOut[]): ExtractedRelationEdge[] {
   const out: ExtractedRelationEdge[] = [];
 
@@ -1142,6 +1167,7 @@ function extractRelationEdges(root: Parser.SyntaxNode, symbols: SymbolOut[]): Ex
         if (sourceIdx >= 0) {
           // Class: walk class_heritage → extends_clause + implements_clause
           if (isClass) {
+            const parentClassNames: string[] = [];
             for (let i = 0; i < node.namedChildCount; i++) {
               const child = node.namedChild(i)!;
               if (child.type !== 'class_heritage') continue;
@@ -1149,10 +1175,12 @@ function extractRelationEdges(root: Parser.SyntaxNode, symbols: SymbolOut[]): Ex
                 const clause = child.namedChild(j)!;
                 if (clause.type === 'extends_clause') {
                   for (const target of clauseTargetExpressions(clause)) {
+                    const targetName = relationTargetText(target);
+                    parentClassNames.push(targetName);
                     out.push({
                       source_symbol_index: sourceIdx,
                       kind: 'extends_class',
-                      target_name: relationTargetText(target),
+                      target_name: targetName,
                       confidence: 'declared',
                       line: clause.startPosition.row + 1,
                     });
@@ -1165,6 +1193,43 @@ function extractRelationEdges(root: Parser.SyntaxNode, symbols: SymbolOut[]): Ex
                       target_name: relationTargetText(target),
                       confidence: 'declared',
                       line: clause.startPosition.row + 1,
+                    });
+                  }
+                }
+              }
+            }
+            // B2 v2: method override edges. For each method in this class
+            // body, emit one `overrides_method` edge per parent class. Target
+            // name encodes `ParentClass.methodName` so the resolver can split
+            // and look up by class scope + method name.
+            if (parentClassNames.length > 0) {
+              const body = node.childForFieldName('body');
+              if (body) {
+                for (let k = 0; k < body.namedChildCount; k++) {
+                  const member = body.namedChild(k)!;
+                  if (member.type !== 'method_definition') continue;
+                  const methodNameNode = member.childForFieldName('name');
+                  if (!methodNameNode) continue;
+                  const methodName = methodNameNode.text;
+                  // Constructors override implicit base constructor — skip;
+                  // overload signatures (no body) — skip; private name (#x) — skip.
+                  if (methodName === 'constructor') continue;
+                  if (methodName.startsWith('#')) continue;
+                  const methodLine = member.startPosition.row + 1;
+                  const methodIdx = findMethodSymbolIndex(
+                    symbols,
+                    sourceName,
+                    methodName,
+                    methodLine,
+                  );
+                  if (methodIdx < 0) continue;
+                  for (const parent of parentClassNames) {
+                    out.push({
+                      source_symbol_index: methodIdx,
+                      kind: 'overrides_method',
+                      target_name: `${parent}.${methodName}`,
+                      confidence: 'declared',
+                      line: methodLine,
                     });
                   }
                 }
@@ -1213,7 +1278,7 @@ const typescriptAdapter: LanguageAdapter = {
     docstrings: true,
     signatures: true,
     refKinds: ['call', 'read', 'write', 'type-ref', 'declaration'],
-    relationKinds: ['extends_class', 'implements', 'extends_interface'],
+    relationKinds: ['extends_class', 'implements', 'extends_interface', 'overrides_method'],
   },
   extract(tree: Parser.Tree, source: string, _filePath: string): ExtractionResult {
     const root = tree.rootNode;
@@ -1228,17 +1293,16 @@ const typescriptAdapter: LanguageAdapter = {
 };
 
 // Register for both typescript and javascript (same adapter, same AST patterns)
-// JS narrows relationKinds to extends_class only — `implements` and
-// `extends_interface` are TS-syntax-only constructs that never appear in JS
-// source. The shared extractor produces no rows for missing node types, so
-// this is a contract narrowing rather than a behavioral change.
+// JS narrows relationKinds: drops `implements` and `extends_interface` (TS-only
+// syntax). JS keeps `extends_class` and `overrides_method` because both arise
+// from runtime class syntax that lives in JavaScript too.
 registerAdapter(typescriptAdapter);
 registerAdapter({
   ...typescriptAdapter,
   language: 'javascript',
   capabilities: {
     ...typescriptAdapter.capabilities,
-    relationKinds: ['extends_class'],
+    relationKinds: ['extends_class', 'overrides_method'],
   },
 });
 
