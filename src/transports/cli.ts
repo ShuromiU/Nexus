@@ -1125,6 +1125,26 @@ export function createProgram(): Command {
     });
 
   program
+    .command('refactor-preview <name>')
+    .description('Dry-run rename preview — every edit site grouped by file plus the rename-safety risk verdict')
+    .option('-f, --file <file>', 'Optional file path to disambiguate')
+    .option('--new-name <new>', 'Optional proposed new name (enables collision detection)')
+    .option('--pretty', 'Pretty-print JSON')
+    .action((name: string, opts: { file?: string; newName?: string; pretty?: boolean }) => {
+      const { db } = openQueryDb(workingRoot());
+      try {
+        const engine = new QueryEngine(db);
+        const result = engine.refactorPreview(name, {
+          file: opts.file,
+          new_name: opts.newName,
+        });
+        printJson(result, !!opts.pretty);
+      } finally {
+        db.close();
+      }
+    });
+
+  program
     .command('kind-index <kind>')
     .description('List all symbols of a given kind, optionally under a path prefix')
     .option('-p, --path <prefix>', 'Path prefix')

@@ -74,7 +74,11 @@ export type {
   BatchSubResult, BatchResult,
   StructuredQueryResult, StructuredOutlineEntry, StructuredOutlineFileResult, StructuredValueKind,
   LockfileDepsResult,
+  RenameSafetyResult, RenameRiskInputs, RiskLevel,
+  RefactorPreviewResult, RefactorPreviewFile, RefactorPreviewEdit,
+  ClarifyResult, ClarifyCandidate,
 } from './query/engine.js';
+export { classifyRenameRisk } from './query/engine.js';
 export { compactify, compactifyValue, maybeCompactify, COMPACT_KEY_MAP } from './query/compact.js';
 export { fuzzyScore, rankResults } from './query/ranking.js';
 export type { FuzzyMatch } from './query/ranking.js';

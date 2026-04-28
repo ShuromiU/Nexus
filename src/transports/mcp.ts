@@ -561,6 +561,20 @@ export function createMcpServer(): Server {
           },
         },
         {
+          name: 'nexus_refactor_preview',
+          description: 'Refactor preview (B6 v2) — dry-run of a rename. Returns every edit site grouped by file (definition + callers + importers + subclasses/implementers + method overrides) along with the same risk verdict as nexus_rename_safety. Use to plan a rename without performing it: each file lists per-line edits with role (definition|caller|importer|subclass|implementer|override) and ref_kind when the language adapter classifies. Does not mutate code.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              name: { type: 'string', description: 'Symbol to preview' },
+              file: { type: 'string', description: 'Optional file path to disambiguate' },
+              new_name: { type: 'string', description: 'Optional proposed new name — enables collision detection' },
+              ...COMPACT_PROP,
+            },
+            required: ['name'],
+          },
+        },
+        {
           name: 'nexus_kind_index',
           description: 'List every symbol of a given kind (interface, class, component, hook, etc.) under an optional path prefix. Replaces grep/search chains for "show me every <kind> in this folder".',
           inputSchema: {
@@ -795,6 +809,11 @@ export function createMcpServer(): Server {
         return qe.clarify(args.name as string);
       case 'nexus_rename_safety':
         return qe.renameSafety(args.name as string, {
+          file: args.file as string | undefined,
+          new_name: args.new_name as string | undefined,
+        });
+      case 'nexus_refactor_preview':
+        return qe.refactorPreview(args.name as string, {
           file: args.file as string | undefined,
           new_name: args.new_name as string | undefined,
         });

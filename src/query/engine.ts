@@ -47,6 +47,7 @@ export type NexusResultType =
   | 'lockfile_deps'
   | 'relations'
   | 'rename_safety'
+  | 'refactor_preview'
   | 'clarify'
   | 'policy_check';
 
@@ -448,6 +449,54 @@ export interface ClarifyResult {
   };
   /** Heuristic picks ranked by usage + structural prominence. */
   suggested_picks: { rationale: string; index: number }[];
+}
+
+/**
+ * One concrete change site that a rename would touch. `role` describes how
+ * the site relates to the renamed symbol; `ref_kind` is present for occurrence
+ * sites when the language adapter classifies them.
+ */
+export interface RefactorPreviewEdit {
+  line: number;
+  col: number;
+  role: 'definition' | 'caller' | 'importer' | 'override' | 'subclass' | 'implementer';
+  context: string;
+  ref_kind?: string;
+}
+
+/**
+ * Per-file aggregation of edits a rename would produce. `kinds` is a
+ * deduplicated set of edit roles found in this file (cheap summary for
+ * UIs that don't render every edit).
+ */
+export interface RefactorPreviewFile {
+  file: string;
+  edits: RefactorPreviewEdit[];
+  kinds: string[];
+}
+
+/**
+ * Composed dry-run preview for a rename refactor (B6 v2). Carries the same
+ * risk verdict as renameSafety (no double work), plus the per-site edit list
+ * a tooling layer needs to *render* the rename without performing it.
+ */
+export interface RefactorPreviewResult {
+  symbol: { name: string; kind: string; file: string; line: number; language: string };
+  new_name: string | null;
+  risk: RiskLevel;
+  reasons: string[];
+  blast_radius: number;
+  files_affected: number;
+  edits_total: number;
+  by_file: RefactorPreviewFile[];
+  /**
+   * When `new_name` is present, lists collisions just like renameSafety so
+   * the caller doesn't need a second call. Empty arrays when no new_name.
+   */
+  collisions: {
+    same_file: { name: string; kind: string; line: number }[];
+    same_module: { name: string; kind: string; file: string; line: number }[];
+  };
 }
 
 export interface RenameSafetyResult {
@@ -1877,6 +1926,200 @@ export class QueryEngine {
       reasons,
     };
     return this.wrap('rename_safety', queryText, [result], start);
+  }
+
+  /**
+   * Refactor preview (B6 v2) — dry-run of a rename. Returns every edit site a
+   * tooling layer would touch (definition + callers + importers + subclasses
+   * + method overrides) grouped by file, plus the same risk verdict as
+   * renameSafety so the caller doesn't make two queries.
+   *
+   * Composes existing store queries (no new SQL): occurrences for caller
+   * sites, module_edges for importer sites, relation_edges (kind='extends_class'
+   * or 'implements') for subclass/implementer sites, relation_edges
+   * (kind='overrides_method') for method overrides.
+   *
+   * Notes:
+   * - "edits" are *suggested* sites. The renamer must still walk the source
+   *   to confirm — Nexus reports occurrences with line+col, not byte offsets.
+   * - Importer rows produce one synthetic edit per (file, line) pair pointing
+   *   at the import statement; the actual identifier offset is best-effort.
+   * - Subclass/implementer/override roles are surfaced as informational sites
+   *   (line of the heritage clause / method declaration).
+   */
+  refactorPreview(
+    name: string,
+    opts?: { file?: string; new_name?: string },
+  ): NexusResult<RefactorPreviewResult> {
+    const start = performance.now();
+    const queryText = `refactor-preview ${name}${opts?.file ? ` --file ${opts.file}` : ''}${opts?.new_name ? ` --new ${opts.new_name}` : ''}`;
+
+    const candidates = this.store.getSymbolsWithFile(name);
+    const sym = opts?.file
+      ? candidates.find(c => c.file_path === opts.file || c.file_path.endsWith(opts.file!))
+      : candidates[0];
+    if (!sym) {
+      const empty: RefactorPreviewResult = {
+        symbol: { name, kind: '', file: opts?.file ?? '', line: 0, language: '' },
+        new_name: opts?.new_name ?? null,
+        risk: 'low',
+        reasons: ['symbol_not_found'],
+        blast_radius: 0,
+        files_affected: 0,
+        edits_total: 0,
+        by_file: [],
+        collisions: { same_file: [], same_module: [] },
+      };
+      return this.wrap('refactor_preview', queryText, [empty], start);
+    }
+
+    // ── Aggregate edits by file ────────────────────────────────────────
+    const byFileMap = new Map<string, { edits: RefactorPreviewEdit[]; kinds: Set<string> }>();
+    const ensure = (file: string): { edits: RefactorPreviewEdit[]; kinds: Set<string> } => {
+      const existing = byFileMap.get(file);
+      if (existing) return existing;
+      const fresh = { edits: [] as RefactorPreviewEdit[], kinds: new Set<string>() };
+      byFileMap.set(file, fresh);
+      return fresh;
+    };
+
+    // Definition edit (always first edit in the symbol's file).
+    {
+      const bucket = ensure(sym.file_path);
+      bucket.edits.push({
+        line: sym.line,
+        col: sym.col,
+        role: 'definition',
+        context: sym.signature ?? sym.name,
+      });
+      bucket.kinds.add('definition');
+    }
+
+    // Caller / type-ref / read / write edits — every occurrence except the
+    // declaration row at (file, line) of the symbol itself.
+    const occRows = this.store.getOccurrencesWithFile(name);
+    const callerFiles = new Set<string>();
+    let callerCount = 0;
+    const refKinds: Record<string, number> = {};
+    for (const o of occRows) {
+      if (o.file_path === sym.file_path && o.line === sym.line) continue;
+      const bucket = ensure(o.file_path);
+      bucket.edits.push({
+        line: o.line,
+        col: o.col,
+        role: 'caller',
+        context: o.context ?? '',
+        ...(o.ref_kind ? { ref_kind: o.ref_kind } : {}),
+      });
+      bucket.kinds.add('caller');
+      callerFiles.add(o.file_path);
+      callerCount++;
+      const rk = o.ref_kind ?? 'unknown';
+      refKinds[rk] = (refKinds[rk] ?? 0) + 1;
+    }
+
+    // Importer edits — one per importing module_edge that names this symbol.
+    const imports = this.store.getImportersByResolvedFileId(sym.file_id);
+    const importerFiles = new Set<string>();
+    for (const e of imports) {
+      if (!(e.is_star || e.name === name || e.alias === name)) continue;
+      const bucket = ensure(e.file_path);
+      bucket.edits.push({
+        line: e.line,
+        col: 0,
+        role: 'importer',
+        context: e.source ? `import from '${e.source}'` : 'import',
+      });
+      bucket.kinds.add('importer');
+      importerFiles.add(e.file_path);
+    }
+
+    // Subclass / implementer / override sites — surfaces children edges
+    // grouped by their relation kind.
+    const childRows = this.store.getRelationsByTarget(name);
+    for (const r of childRows) {
+      const bucket = ensure(r.source_file);
+      let role: RefactorPreviewEdit['role'];
+      if (r.kind === 'extends_class') role = 'subclass';
+      else if (r.kind === 'implements') role = 'implementer';
+      else if (r.kind === 'overrides_method') role = 'override';
+      else continue;
+      bucket.edits.push({
+        line: r.line,
+        col: 0,
+        role,
+        context: `${r.kind} ${r.source_name}`,
+      });
+      bucket.kinds.add(role);
+    }
+
+    // Collisions for new_name (mirrors renameSafety).
+    const sameFileCollisions: { name: string; kind: string; line: number }[] = [];
+    const sameModuleCollisions: { name: string; kind: string; file: string; line: number }[] = [];
+    if (opts?.new_name && opts.new_name !== name) {
+      const colliders = this.store.getSymbolsWithFile(opts.new_name);
+      for (const c of colliders) {
+        if (c.file_path === sym.file_path) {
+          sameFileCollisions.push({ name: c.name, kind: c.kind, line: c.line });
+        } else {
+          const sd = sym.file_path.includes('/')
+            ? sym.file_path.slice(0, sym.file_path.lastIndexOf('/'))
+            : '';
+          const cd = c.file_path.includes('/')
+            ? c.file_path.slice(0, c.file_path.lastIndexOf('/'))
+            : '';
+          if (sd === cd) {
+            sameModuleCollisions.push({ name: c.name, kind: c.kind, file: c.file_path, line: c.line });
+          }
+        }
+      }
+    }
+
+    // Risk verdict — same classifier as renameSafety so the two are aligned.
+    const parentRows = this.store.getRelationsBySource(name);
+    const { risk, reasons } = classifyRenameRisk({
+      callerCount,
+      refKinds,
+      importerCount: importerFiles.size,
+      childCount: childRows.length,
+      parentCount: parentRows.length,
+      sameFileCollisions: sameFileCollisions.length,
+      sameModuleCollisions: sameModuleCollisions.length,
+    });
+
+    // Materialize by_file: sort files alphabetically, edits within a file
+    // by (line, col) for stable preview output.
+    const byFile: RefactorPreviewFile[] = [...byFileMap.entries()]
+      .map(([file, b]) => ({
+        file,
+        edits: [...b.edits].sort((a, c) => a.line - c.line || a.col - c.col),
+        kinds: [...b.kinds].sort(),
+      }))
+      .sort((a, b) => a.file.localeCompare(b.file));
+
+    const editsTotal = byFile.reduce((acc, f) => acc + f.edits.length, 0);
+
+    const result: RefactorPreviewResult = {
+      symbol: {
+        name: sym.name,
+        kind: sym.kind,
+        file: sym.file_path,
+        line: sym.line,
+        language: sym.file_language,
+      },
+      new_name: opts?.new_name ?? null,
+      risk,
+      reasons,
+      blast_radius: callerCount + importerFiles.size + childRows.length,
+      files_affected: byFile.length,
+      edits_total: editsTotal,
+      by_file: byFile,
+      collisions: {
+        same_file: sameFileCollisions,
+        same_module: sameModuleCollisions,
+      },
+    };
+    return this.wrap('refactor_preview', queryText, [result], start);
   }
 
   /**
