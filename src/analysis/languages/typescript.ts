@@ -1228,8 +1228,19 @@ const typescriptAdapter: LanguageAdapter = {
 };
 
 // Register for both typescript and javascript (same adapter, same AST patterns)
+// JS narrows relationKinds to extends_class only — `implements` and
+// `extends_interface` are TS-syntax-only constructs that never appear in JS
+// source. The shared extractor produces no rows for missing node types, so
+// this is a contract narrowing rather than a behavioral change.
 registerAdapter(typescriptAdapter);
-registerAdapter({ ...typescriptAdapter, language: 'javascript' });
+registerAdapter({
+  ...typescriptAdapter,
+  language: 'javascript',
+  capabilities: {
+    ...typescriptAdapter.capabilities,
+    relationKinds: ['extends_class'],
+  },
+});
 
 /**
  * Test-only helper: parse a TypeScript source string and return its
