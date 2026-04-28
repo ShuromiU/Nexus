@@ -99,6 +99,17 @@ CREATE TABLE IF NOT EXISTS occurrences (
   confidence TEXT NOT NULL DEFAULT 'heuristic',
   ref_kind   TEXT
 );
+
+CREATE TABLE IF NOT EXISTS relation_edges (
+  id              INTEGER PRIMARY KEY,
+  file_id         INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  source_id       INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL,
+  target_name     TEXT NOT NULL,
+  target_path_key TEXT,
+  confidence      TEXT NOT NULL DEFAULT 'declared',
+  line            INTEGER NOT NULL
+);
 `;
 
 const OVERLAY_INDEXES = `
@@ -109,6 +120,11 @@ CREATE INDEX IF NOT EXISTS idx_overlay_edges_file        ON module_edges(file_id
 CREATE INDEX IF NOT EXISTS idx_overlay_edges_resolved    ON module_edges(resolved_path_key);
 CREATE INDEX IF NOT EXISTS idx_overlay_occur_name        ON occurrences(name);
 CREATE INDEX IF NOT EXISTS idx_overlay_occur_file        ON occurrences(file_id);
+CREATE INDEX IF NOT EXISTS idx_overlay_rel_source        ON relation_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_overlay_rel_target_pk     ON relation_edges(target_path_key);
+CREATE INDEX IF NOT EXISTS idx_overlay_rel_target_name   ON relation_edges(target_name);
+CREATE INDEX IF NOT EXISTS idx_overlay_rel_kind          ON relation_edges(kind);
+CREATE INDEX IF NOT EXISTS idx_overlay_rel_file          ON relation_edges(file_id);
 `;
 
 export interface OverlayMetaInput {
@@ -122,14 +138,38 @@ export interface OverlayMetaInput {
   degraded_reason?: string;
 }
 
+export interface InsertSymbolsResult {
+  /** First-write-wins per name — used for module_edges symbol_id resolution. */
+  idsByName: Map<string, number>;
+  /** Parallel to input order — used for relation_edges source_id mapping. */
+  idsByIndex: number[];
+}
+
+export interface OverlayRelationRow {
+  file_id: number;
+  source_id: number;
+  kind: string;
+  target_name: string;
+  target_path_key: string | null;
+  confidence: string;
+  line: number;
+}
+
 export interface OverlayWriter {
   insertFile(row: Omit<FileRow, 'id'>): number;
-  insertSymbols(fileId: number, syms: ExtractedSymbol[]): Map<string, number>;
+  insertSymbols(fileId: number, syms: ExtractedSymbol[]): InsertSymbolsResult;
   insertModuleEdges(
     fileId: number,
     edges: ExtractedEdge[],
     symbolIdsByName: Map<string, number>,
   ): void;
+  /**
+   * Insert pre-resolved relation rows. Caller (overlay-orchestrator) is
+   * responsible for resolving same-file and cross-file targets to a path_key
+   * before calling. Cross-file resolution requires knowledge of the parent
+   * index, which the writer doesn't have access to.
+   */
+  insertRelationEdges(rows: OverlayRelationRow[]): void;
   insertOccurrences(fileId: number, occ: ExtractedOccurrence[]): void;
   recordDeleted(paths: { path: string; path_key: string }[]): void;
   setMeta(meta: OverlayMetaInput): void;
@@ -180,6 +220,11 @@ export function openOverlayWriter(finalPath: string): OverlayWriter {
     INSERT INTO occurrences(file_id, name, line, col, context, confidence, ref_kind)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
+  const insertRelStmt = db.prepare<unknown[]>(`
+    INSERT INTO relation_edges(file_id, source_id, kind, target_name,
+                               target_path_key, confidence, line)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
   const insertDeletedStmt = db.prepare<unknown[]>(`
     INSERT OR REPLACE INTO deleted_files(path, path_key) VALUES (?, ?)
   `);
@@ -199,22 +244,25 @@ export function openOverlayWriter(finalPath: string): OverlayWriter {
     },
 
     insertSymbols(fileId, syms) {
-      const map = new Map<string, number>();
+      const idsByName = new Map<string, number>();
+      const idsByIndex: number[] = [];
       const insertMany = db.transaction((rows: ExtractedSymbol[]) => {
         for (const s of rows) {
           const r = insertSymbolStmt.run(
             fileId, s.name, s.kind, s.line, s.col, s.end_line ?? null,
             s.signature ?? null, s.scope ?? null, s.doc ?? null,
           );
+          const id = Number(r.lastInsertRowid);
+          idsByIndex.push(id);
           // First-write-wins: if the same name appears multiple times in a file
           // (overloads, re-declarations), the first one is the one we'll use
           // for symbol_id resolution in module_edges. This mirrors the parent
           // index behavior (NexusStore does the same).
-          if (!map.has(s.name)) map.set(s.name, Number(r.lastInsertRowid));
+          if (!idsByName.has(s.name)) idsByName.set(s.name, id);
         }
       });
       insertMany(syms);
-      return map;
+      return { idsByName, idsByIndex };
     },
 
     insertModuleEdges(fileId, edges, symbolIdsByName) {
@@ -239,6 +287,19 @@ export function openOverlayWriter(finalPath: string): OverlayWriter {
         }
       });
       insertMany(edges);
+    },
+
+    insertRelationEdges(rows) {
+      if (rows.length === 0) return;
+      const insertMany = db.transaction((entries: OverlayRelationRow[]) => {
+        for (const r of entries) {
+          insertRelStmt.run(
+            r.file_id, r.source_id, r.kind, r.target_name,
+            r.target_path_key, r.confidence, r.line,
+          );
+        }
+      });
+      insertMany(rows);
     },
 
     insertOccurrences(fileId, occ) {

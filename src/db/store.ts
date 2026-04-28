@@ -236,6 +236,49 @@ export class NexusStore {
                END AS resolved_file_id
           FROM overlay.module_edges m;
 
+      DROP VIEW IF EXISTS temp.relation_edges;
+      CREATE TEMP VIEW relation_edges AS
+        SELECT r.id, r.file_id, r.source_id, r.kind, r.target_name, r.line, r.confidence,
+               CASE
+                 WHEN r.target_id IS NULL THEN NULL
+                 WHEN tgt_file.path_key IN (SELECT path_key FROM overlay.deleted_files) THEN NULL
+                 WHEN tgt_file.path_key IN (SELECT path_key FROM overlay_path_index) THEN
+                   (SELECT -s.id FROM overlay.symbols s
+                      JOIN overlay.files f ON s.file_id = f.id
+                     WHERE f.path_key = tgt_file.path_key
+                       AND s.name = r.target_name
+                       AND s.kind IN ('class', 'interface', 'type')
+                     LIMIT 1)
+                 ELSE r.target_id
+               END AS target_id
+          FROM main.relation_edges r
+          JOIN main.symbols src_sym ON src_sym.id = r.source_id
+          JOIN main.files src_file ON src_file.id = src_sym.file_id
+          LEFT JOIN main.symbols tgt_sym ON tgt_sym.id = r.target_id
+          LEFT JOIN main.files tgt_file ON tgt_file.id = tgt_sym.file_id
+         WHERE src_file.path_key NOT IN (SELECT path_key FROM changed_or_deleted)
+        UNION ALL
+        SELECT -r.id, -r.file_id, -r.source_id, r.kind, r.target_name, r.line, r.confidence,
+               CASE
+                 WHEN r.target_path_key IS NULL THEN NULL
+                 WHEN r.target_path_key IN (SELECT path_key FROM overlay.deleted_files) THEN NULL
+                 WHEN r.target_path_key IN (SELECT path_key FROM overlay_path_index) THEN
+                   (SELECT -s.id FROM overlay.symbols s
+                      JOIN overlay.files f ON s.file_id = f.id
+                     WHERE f.path_key = r.target_path_key
+                       AND s.name = r.target_name
+                       AND s.kind IN ('class', 'interface', 'type')
+                     LIMIT 1)
+                 ELSE
+                   (SELECT s.id FROM main.symbols s
+                      JOIN main.files f ON s.file_id = f.id
+                     WHERE f.path_key = r.target_path_key
+                       AND s.name = r.target_name
+                       AND s.kind IN ('class', 'interface', 'type')
+                     LIMIT 1)
+               END AS target_id
+          FROM overlay.relation_edges r;
+
       DROP VIEW IF EXISTS temp.meta;
       CREATE TEMP VIEW meta AS
         SELECT key, value FROM main.meta
@@ -258,6 +301,7 @@ export class NexusStore {
       this.db.exec(`
         DROP VIEW IF EXISTS temp.index_runs;
         DROP VIEW IF EXISTS temp.meta;
+        DROP VIEW IF EXISTS temp.relation_edges;
         DROP VIEW IF EXISTS temp.module_edges;
         DROP VIEW IF EXISTS temp.occurrences;
         DROP VIEW IF EXISTS temp.symbols;

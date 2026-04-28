@@ -491,15 +491,18 @@ const RESOLVE_EXTENSIONS = [
 ];
 
 /**
- * Resolve a relative import specifier to a file ID.
+ * Resolve a relative import specifier to a value keyed by path_key.
  * Tries the specifier as-is, then with common extensions appended.
+ *
+ * Generic in `T` so callers can map path_keys to either file IDs (parent
+ * resolution) or back to path_key strings (overlay cross-file resolution).
  */
-function resolveModulePath(
+export function resolveModulePath<T>(
   source: string,
   importerDir: string,
   caseSensitive: boolean,
-  fileByPathKey: Map<string, number>,
-): number | undefined {
+  fileByPathKey: Map<string, T>,
+): T | undefined {
   // Normalize: join importer dir + relative specifier
   const parts = (importerDir ? importerDir + '/' + source : source).split('/');
   const resolved: string[] = [];

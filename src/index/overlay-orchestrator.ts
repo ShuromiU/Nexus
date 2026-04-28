@@ -27,8 +27,11 @@ import {
 import { loadConfig } from '../config.js';
 import { classifyPath, type ClassifyConfig } from '../workspace/classify.js';
 import { extractSource } from '../analysis/extractor.js';
+import type { ExtractedRelationEdge } from '../analysis/languages/registry.js';
 import { readAndHash } from '../workspace/changes.js';
-import { runIndex, type IndexResult } from './orchestrator.js';
+import { runIndex, resolveModulePath, type IndexResult } from './orchestrator.js';
+import type { OverlayRelationRow } from '../db/overlay.js';
+import type { SymbolRow, ModuleEdgeRow } from '../db/store.js';
 
 export const MAX_OVERLAY_FILES = 500;
 
@@ -90,6 +93,10 @@ export function buildWorktreeIndex(info: WorktreeWorkspaceInfo): OverlayBuildOut
   let skipped = 0;
   let errored = 0;
   const deleted: { path: string; path_key: string }[] = [];
+  // Per-file relation context, deferred until all overlay files are inserted
+  // so cross-file resolution can see every overlay path before falling back
+  // to the parent index.
+  const pendingRelations: PendingRelationFile[] = [];
 
   try {
     for (const change of changeSet) {
@@ -144,13 +151,30 @@ export function buildWorktreeIndex(info: WorktreeWorkspaceInfo): OverlayBuildOut
       });
 
       if (result.parsed) {
-        const symMap = writer.insertSymbols(fileId, result.symbols);
-        writer.insertModuleEdges(fileId, result.edges, symMap);
+        const { idsByName, idsByIndex } = writer.insertSymbols(fileId, result.symbols);
+        writer.insertModuleEdges(fileId, result.edges, idsByName);
         writer.insertOccurrences(fileId, result.occurrences);
+        if ((result.relations ?? []).length > 0) {
+          pendingRelations.push({
+            fileId,
+            filePath: change.path,
+            pathKey,
+            relations: result.relations ?? [],
+            edges: result.edges,
+            symbols: result.symbols,
+            symbolIdsByIndex: idsByIndex,
+          });
+        }
         indexed++;
       } else {
         errored++;
       }
+    }
+
+    // Resolve relation edges across overlay+parent and insert in one batch.
+    if (pendingRelations.length > 0) {
+      const rows = resolvePendingRelations(pendingRelations, info, caseSensitive);
+      writer.insertRelationEdges(rows);
     }
 
     if (deleted.length > 0) writer.recordDeleted(deleted);
@@ -280,4 +304,143 @@ function fallbackToIsolated(
     reason,
     result: { ...result, durationMs: Date.now() - start },
   };
+}
+
+// ─── Cross-file relation resolution (T12) ────────────────────────────
+
+type ExtractedSymbol = Omit<SymbolRow, 'id' | 'file_id'>;
+type ExtractedEdge = Omit<ModuleEdgeRow, 'id' | 'file_id' | 'symbol_id' | 'resolved_file_id'>;
+
+interface PendingRelationFile {
+  fileId: number;
+  /** POSIX path of the file (used to derive importer dir for resolution). */
+  filePath: string;
+  /** path_key of this file (for same-file target resolution). */
+  pathKey: string;
+  relations: ExtractedRelationEdge[];
+  edges: ExtractedEdge[];
+  symbols: ExtractedSymbol[];
+  /** Parallel to symbols — DB ids assigned at insert time. */
+  symbolIdsByIndex: number[];
+}
+
+/**
+ * Resolve overlay relation edges (same-file + cross-file) to path_keys.
+ *
+ * Strategy:
+ *   1. Build a Map<pathKey, pathKey> covering all overlay files PLUS unchanged
+ *      parent files (read once from the parent index, joined with the overlay's
+ *      `deleted_files` mask).
+ *   2. For each pending relation:
+ *      a. If target_name is a top-level class/interface/type in the same file,
+ *         set target_path_key = file's own path_key.
+ *      b. Else, look up the file's import edges for one whose alias-or-name
+ *         matches `target_name` (or the namespace prefix for `ns.X`).
+ *      c. Resolve the import's raw `source` against the merged path_key map
+ *         using the same trial-extension logic as the parent orchestrator.
+ *      d. Set target_path_key = resolved path_key (or null if unresolved).
+ *
+ * The merged TEMP view in `Store.attachOverlay()` finishes the job: it takes
+ * the path_key + target_name and looks up the actual symbol id in either
+ * `overlay.symbols` or `main.symbols`.
+ */
+function resolvePendingRelations(
+  pending: PendingRelationFile[],
+  info: WorktreeWorkspaceInfo,
+  caseSensitive: boolean,
+): OverlayRelationRow[] {
+  // Build the merged path_key map: overlay files override parent files; deleted
+  // overlay paths mask parent files; otherwise parent files are reachable.
+  const pathKeyMap = new Map<string, string>();
+  for (const f of pending) pathKeyMap.set(f.pathKey, f.pathKey);
+
+  // Read parent file path_keys (cheap — one query, no joins).
+  const parentDb = openDatabase(info.baseIndexPath, { readonly: true });
+  try {
+    const parentPaths = parentDb
+      .prepare("SELECT path_key FROM files WHERE status = 'indexed'")
+      .all() as { path_key: string }[];
+    for (const r of parentPaths) {
+      if (!pathKeyMap.has(r.path_key)) pathKeyMap.set(r.path_key, r.path_key);
+    }
+  } finally {
+    try { parentDb.close(); } catch { /* ignore */ }
+  }
+
+  const out: OverlayRelationRow[] = [];
+
+  for (const file of pending) {
+    // Same-file lookup: name → first matching top-level type id position.
+    const localTypeNames = new Set<string>();
+    for (const s of file.symbols) {
+      if (s.kind === 'class' || s.kind === 'interface' || s.kind === 'type') {
+        localTypeNames.add(s.name);
+      }
+    }
+
+    // Build per-file import lookups (alias-or-name → import edge).
+    const namedImports = new Map<string, ExtractedEdge>();
+    const starImports = new Map<string, ExtractedEdge>();
+    for (const e of file.edges) {
+      if (e.kind !== 'import' && e.kind !== 'dynamic-import' && e.kind !== 'require') continue;
+      if (e.is_star && e.alias) {
+        starImports.set(e.alias, e);
+      } else {
+        const local = e.alias ?? e.name;
+        if (local && !namedImports.has(local)) namedImports.set(local, e);
+      }
+    }
+
+    const importerDir = file.filePath.includes('/')
+      ? file.filePath.slice(0, file.filePath.lastIndexOf('/'))
+      : '';
+
+    for (const r of file.relations) {
+      if (r.source_symbol_index < 0 || r.source_symbol_index >= file.symbolIdsByIndex.length) {
+        continue;
+      }
+      const sourceId = file.symbolIdsByIndex[r.source_symbol_index];
+      let targetPathKey: string | null = null;
+
+      if (localTypeNames.has(r.target_name)) {
+        // Same-file target.
+        targetPathKey = file.pathKey;
+      } else {
+        const dotIdx = r.target_name.indexOf('.');
+        let importEdge: ExtractedEdge | undefined;
+
+        if (dotIdx > 0) {
+          // ns.Name → namespace import.
+          const ns = r.target_name.slice(0, dotIdx);
+          const tail = r.target_name.slice(dotIdx + 1);
+          if (!tail.includes('.')) {
+            importEdge = starImports.get(ns);
+          }
+        } else if (/^[A-Za-z_$][\w$]*$/.test(r.target_name)) {
+          // Bare identifier → named import.
+          importEdge = namedImports.get(r.target_name);
+        }
+        // Call expressions / unsupported syntax → leave unresolved.
+
+        if (importEdge && importEdge.source) {
+          const resolved = resolveModulePath(
+            importEdge.source, importerDir, caseSensitive, pathKeyMap,
+          );
+          if (resolved !== undefined) targetPathKey = resolved;
+        }
+      }
+
+      out.push({
+        file_id: file.fileId,
+        source_id: sourceId,
+        kind: r.kind,
+        target_name: r.target_name,
+        target_path_key: targetPathKey,
+        confidence: r.confidence,
+        line: r.line,
+      });
+    }
+  }
+
+  return out;
 }
